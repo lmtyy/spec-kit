@@ -79,6 +79,7 @@ def preset_disable(
             "_collect_selector_command_names",
             "_expand_command_selectors",
             "_skill_names_for_command",
+            "_command_names_for_skill_names",
             "_historical_command_targets",
         )
     ):
@@ -97,6 +98,25 @@ def preset_disable(
             if isinstance(values, list)
             for name in values
             if isinstance(name, str)
+        )
+    if isinstance(original_skills, dict):
+        # A preset that only ever wrote skills has no ``registered_commands``
+        # entry, and once its manifest cannot be read a safety-rejected selector
+        # empties both the manifest declarations and the selector-matched names.
+        # The recorded skill names are then the only ownership evidence left, so
+        # recover the command names from them; otherwise the preset reports
+        # disabled while its SKILL.md stays active on disk.
+        names.update(
+            manager._command_names_for_skill_names(
+                [
+                    name
+                    for values in original_skills.values()
+                    if isinstance(values, list)
+                    for name in values
+                    if isinstance(name, str)
+                ],
+                resolver,
+            )
         )
     historical_agents, historical_skills_dirs = manager._historical_command_targets(
         names

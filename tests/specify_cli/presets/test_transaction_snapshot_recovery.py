@@ -7,8 +7,6 @@ never replace the operation's own exception with a cleanup error.
 
 from __future__ import annotations
 
-import os
-
 import pytest
 
 from specify_cli.presets import _transaction
@@ -101,7 +99,7 @@ def test_directory_symlink_survives_a_snapshot_round_trip(tmp_path):
     real_dir.mkdir()
     (real_dir / "inside.md").write_text("BODY\n", encoding="utf-8")
     link = tmp_path / "link"
-    link.symlink_to(real_dir)
+    link.symlink_to(real_dir, target_is_directory=True)
 
     snapshot = _transaction._ArtifactSnapshot()
     snapshot.capture(link)
@@ -110,5 +108,5 @@ def test_directory_symlink_survives_a_snapshot_round_trip(tmp_path):
 
     assert link.is_symlink(), "restored path is not a symlink"
     assert link.is_dir(), "restored directory link does not resolve to a directory"
-    assert os.readlink(link) == str(real_dir)
+    assert link.samefile(real_dir)
     snapshot.close()

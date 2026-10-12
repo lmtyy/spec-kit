@@ -648,6 +648,12 @@ class _PresetCommandMethods:
         ai_skills_now = is_command_backed and is_ai_skills_enabled(
             load_init_options(self.project_root)
         )
+        # Absence of init-options does not declare a skills -> commands switch.
+        # Keep historical skill ownership available to legacy reconciliation.
+        mode_is_recorded = (
+            resolve_active_agent_for_registration(self.project_root)
+            is not MISSING_INIT_OPTIONS_FILE
+        )
 
         from ._resolver import PresetResolver
         from ._selectors import is_regex_selector
@@ -837,6 +843,7 @@ class _PresetCommandMethods:
                     ]
                 elif (
                     is_command_backed
+                    and mode_is_recorded
                     and not ai_skills_now
                     and merged_skills.get(agent_name)
                 ):

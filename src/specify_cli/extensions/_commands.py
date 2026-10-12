@@ -172,26 +172,18 @@ def _refresh_presets_and_warn(
     artifacts still reflect the previous ordering). Default callers keep the
     existing best-effort warning behavior.
     """
-    from .._init_options import load_init_options
+    from .._init_options import (
+        MISSING_INIT_OPTIONS_FILE,
+        resolve_active_agent_for_registration,
+    )
     from ..presets import PresetManager
 
-    agent = load_init_options(project_root).get("ai")
-    if not agent:
+    agent = resolve_active_agent_for_registration(project_root)
+    if agent is None:
         return
     manager = PresetManager(project_root)
-    if strict:
-        manager.register_enabled_presets_for_agent(
-            agent, affected_commands=affected_commands, strict=True
-        )
-        return
-    try:
-        if affected_commands:
-            manager.register_enabled_presets_for_agent(
-                agent, affected_commands=affected_commands
-            )
-        else:
-            manager.register_enabled_presets_for_agent(agent)
-    except Exception as exc:
+
+    def warn(exc):
         from .. import _print_cli_warning
 
         _print_cli_warning(
@@ -201,6 +193,95 @@ def _refresh_presets_and_warn(
             exc,
             continuing="Continuing; run 'specify integration use' to retry registration.",
         )
+
+    try:
+        if agent is MISSING_INIT_OPTIONS_FILE and affected_commands is None:
+            from ..presets._resolver import PresetResolver
+
+            affected_commands = manager._collect_selector_command_names(
+                PresetResolver(project_root)
+            )
+        agents = (
+            _legacy_preset_registration_agents(manager, affected_commands)
+            if agent is MISSING_INIT_OPTIONS_FILE
+            else [agent]
+        )
+    except Exception as exc:
+        if strict:
+            raise
+        warn(exc)
+        return
+    if strict:
+        for target in agents:
+            manager.register_enabled_presets_for_agent(
+                target, affected_commands=affected_commands, strict=True
+            )
+        return
+    for target in agents:
+        try:
+            if affected_commands:
+                manager.register_enabled_presets_for_agent(
+                    target, affected_commands=affected_commands
+                )
+            else:
+                manager.register_enabled_presets_for_agent(target)
+        except Exception as exc:
+            warn(exc)
+
+
+def _legacy_preset_registration_agents(manager, affected_commands) -> list[str]:
+    """Use recorded ownership and existing registrar roots for legacy projects.
+
+    Never invent a default agent or search arbitrary same-named files. The
+    normal reconciliation code owns rendering and provenance-checked cleanup.
+    """
+    from ..agents import CommandRegistrar
+    from . import ExtensionManager
+
+    extensions = ExtensionManager(manager.project_root)
+    agents = set(extensions._command_registration_targets())
+    for agent, config in CommandRegistrar.AGENT_CONFIGS.items():
+        detect_dir = config.get("detect_dir")
+        if detect_dir and not (manager.project_root / detect_dir).is_dir():
+            continue
+        directory = manager._safe_skills_dir_for_agent(agent)
+        if (
+            directory is not None
+            and directory.is_dir()
+            and directory.absolute().is_relative_to(manager.project_root.absolute())
+        ):
+            agents.add(agent)
+    skill_names = {
+        skill
+        for command in affected_commands or ()
+        for skill in manager._skill_names_for_command(command)
+    }
+    for registry in (manager.registry, extensions.registry):
+        for identifier, metadata in registry.list_by_priority(include_disabled=True):
+            for field, affected in (
+                ("registered_commands", affected_commands),
+                (
+                    "registered_skills",
+                    skill_names if affected_commands is not None else None,
+                ),
+            ):
+                recorded = metadata.get(field, {})
+                if (
+                    registry is manager.registry
+                    and field == "registered_skills"
+                    and isinstance(recorded, list)
+                ):
+                    recorded = manager._infer_legacy_skill_provenance(
+                        recorded, identifier, fallback_agent=""
+                    )
+                if isinstance(recorded, dict):
+                    agents.update(
+                        agent
+                        for agent, names in recorded.items()
+                        if isinstance(names, list)
+                        and (affected is None or set(names) & affected)
+                    )
+    return sorted(agents)
 
 
 def _refresh_events_and_warn(project_root: Path) -> None:

@@ -44,7 +44,16 @@ class PresetResolver:
             if manifest_path.exists():
                 try:
                     self._manifest_cache[key] = PresetManifest(manifest_path)
-                except PresetValidationError:
+                except PresetValidationError as exc:
+                    from ._selectors import SelectorSafetyError
+
+                    if isinstance(exc.__cause__, SelectorSafetyError):
+                        import warnings
+
+                        warnings.warn(
+                            f"Ignoring unsafe preset manifest {manifest_path}: {exc}",
+                            stacklevel=2,
+                        )
                     self._manifest_cache[key] = None
             else:
                 self._manifest_cache[key] = None
@@ -637,6 +646,10 @@ class PresetResolver:
             return candidate
         candidate = self._conventional_resource(base_dir, name, template_type)
         if candidate is None and template_type == "command":
+            candidate = self._conventional_resource(
+                base_dir / "templates", name, template_type
+            )
+        if candidate is None and template_type == "command":
             candidate = self._find_unregistered_extension_command(name, base_dir)
         return candidate
 
@@ -651,9 +664,16 @@ class PresetResolver:
     def _conventional_resource(
         self, base_dir: Path, name: str, template_type: str
     ) -> Optional[Path]:
+        # ``templates/commands`` is a conventional command location in its own
+        # right: _conventional_command_names and _expand_command_selectors both
+        # enumerate it, for lower presets as well as for extensions. Searching it
+        # here — at the single shared lookup — is what keeps the preset-side
+        # eligibility check that calls this method directly in agreement with
+        # selector expansion; otherwise a matched resource is never offered as a
+        # layer and the selector materializes nothing.
         subdirs = {
             "template": ("templates", ""),
-            "command": ("commands",),
+            "command": ("commands", "templates/commands"),
             "script": ("scripts",),
         }.get(template_type, ("",))
         extension = ".sh" if template_type == "script" else ".md"

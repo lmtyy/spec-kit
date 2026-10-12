@@ -72,10 +72,8 @@ def test_extension_change_refresh_targets_only_active_integration(
         def register_enabled_presets_for_agent(self, agent):
             calls.append(agent)
 
-    monkeypatch.setattr(
-        "specify_cli._init_options.load_init_options",
-        lambda project_root: {"ai": "active-agent"},
-    )
+    (tmp_path / ".specify").mkdir()
+    (tmp_path / ".specify/init-options.json").write_text('{"ai": "active-agent"}')
     monkeypatch.setattr("specify_cli.presets.PresetManager", FakePresetManager)
 
     _commands._refresh_presets_and_warn(tmp_path)
@@ -90,9 +88,8 @@ def test_extension_change_refresh_skips_when_no_integration_selected(
         def __init__(self, project_root):
             raise AssertionError("should not construct without an active agent")
 
-    monkeypatch.setattr(
-        "specify_cli._init_options.load_init_options", lambda project_root: {}
-    )
+    (tmp_path / ".specify").mkdir()
+    (tmp_path / ".specify/init-options.json").write_text("{}")
     monkeypatch.setattr("specify_cli.presets.PresetManager", UnexpectedPresetManager)
 
     _commands._refresh_presets_and_warn(tmp_path)

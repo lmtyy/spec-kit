@@ -346,6 +346,58 @@ Zero-match and invalid patterns are handled as follows:
 - A `regex:` selector that currently matches no lower-layer resource contributes nothing. Installing such a preset emits a warning; it does **not** fail the installation.
 - `specify preset info` lists each selector's current concrete matches nested beneath the declaration, or `No current matches` when there are none.
 - `specify preset resolve <name>` attributes the layers it traces back to the declaration that matched, for example `sel-pack v1.0.0 → …/spec-template.md (via regex:^spec-.*$)`, so a selector-driven resolution is visible in the stack trace and not only in `preset info`.
+
+
+#### Regex selector safety boundaries
+
+A `regex:` selector pattern is validated when a preset is installed, and again
+whenever a selector is evaluated — including a selector found in a manifest that is
+already on disk. Validation enforces these limits, and a pattern past one of them is
+rejected with a `PresetValidationError` that names the limit it broke:
+
+| Limit | Value |
+| --- | --- |
+| pattern length | 4096 characters after the `regex:` prefix |
+| compiled states | 4096 |
+| compiled edges | 2048 |
+| resource name length | 1024 characters |
+
+Matching never uses Python's backtracking engine. A selector is compiled to a state
+machine whose work is bounded by `(resource name length + 1) × compiled edges`, so no
+valid selector can make the CLI hang, however long or unlucky the resource name is.
+The state and edge counts are capped separately because a branch reuses one entry
+state for all of its alternatives: `(?:a|\B|\B|…){4000}` keeps the state count small
+while producing millions of edges.
+
+A selector found in a manifest that is already on disk — written by an older version,
+or edited by hand — does not raise during resolution. It is reported with a warning
+and treated as matching nothing, so an unsafe manifest cannot break unrelated
+commands. Only the installation path fails hard.
+
+The supported syntax is a subset of Python's regular expressions: literal characters
+and escapes, `.`, character classes (`[a-z]`, `[^x]`), the predefined classes (`\d`,
+`\w`, `\s` and their negations), grouping (`(...)`, `(?:...)`), alternation, the
+anchors `^ $ \A \Z \b \B`, inline flags (`(?i)`, `(?i:...)`), and the quantifiers
+`* + ? {m} {m,} {m,n}` including their lazy forms. The following are **refused**,
+because their behaviour cannot be analysed from the parsed pattern alone or because
+they are the shapes that make backtracking matchers hang:
+
+- backreferences (`\1`) and named backreferences (`(?P=name)`);
+- lookarounds (`(?=…)`, `(?!…)`, `(?<=…)`, `(?<!…)`);
+- atomic groups (`(?>…)`) and possessive quantifiers (`a*+`);
+- a repetition nested inside another repetition (`(a+)+`, `(a*)*`);
+- a repetition whose body can match the empty string (`(a|)*`, `(?:)*`, `\B*`);
+- an unbounded repetition over a zero-width alternation, such as `(a|a)*`, which the
+  parser factorises into `a` followed by a branch whose alternatives are all empty.
+
+Two similar-looking cases are deliberately treated differently:
+
+- `(ab|a)*` and `(ba|b)*c` are **accepted**. The parser factorises the shared prefix
+  out of the alternation, which leaves a branch with an empty alternative, but the
+  repeated body still has to consume `ab`/`ba` in every alternative. It cannot match
+  the empty string, so the repetition is unambiguous.
+- `(a|a)*` is **refused**, because there the factorised branch has no non-empty
+  alternative at all and the repeated body is genuinely zero-width.
 - An invalid regular expression is rejected during manifest validation, so a preset with a malformed pattern fails to install with a clear validation error rather than at resolution time.
 
 The resolution stack, from highest to lowest precedence:

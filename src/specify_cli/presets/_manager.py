@@ -1228,4 +1228,9 @@ class PresetManager(_PresetCommandMethods, _PresetSkillMethods):
         try:
             return PresetManifest(manifest_path)
         except PresetValidationError:
+            # Keep the documented Optional contract: every other consumer
+            # (artifact inventory, JSON info, bundle reference checks) treats
+            # this as "unreadable manifest" and must keep working for a preset
+            # whose selector was rejected by the safety boundary. `preset info`
+            # re-reads the manifest itself to surface the precise reason.
             return None

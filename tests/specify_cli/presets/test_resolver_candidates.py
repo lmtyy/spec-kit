@@ -201,3 +201,35 @@ def test_distinct_providers_and_exact_regex_declarations_are_not_deduplicated(
     assert resolver.resolve_content("speckit.target.collect", "command") == (
         "# target base\n\n\noverlay\n\n\noverlay\n\n\noverlay\n"
     )
+
+
+def test_lower_preset_conventional_templates_command_is_a_candidate(tmp_path):
+    """A lower preset's templates/commands/<name>.md must be discoverable.
+
+    _conventional_command_names and _expand_command_selectors both enumerate that
+    location, for lower presets as much as for extensions, so the shared
+    conventional lookup the eligibility check relies on has to agree with them.
+    Before the fix the file was enumerated as a candidate name but resolved to no
+    layer, so a selector that matched it materialized nothing.
+    """
+    from specify_cli.presets._resolver import PresetResolver
+
+    pack = tmp_path / ".specify" / "presets" / "lower"
+    (pack / "templates" / "commands").mkdir(parents=True)
+    body = pack / "templates" / "commands" / "speckit.lower.extra.md"
+    body.write_text("---\ndescription: lower\n---\nLOWER BODY\n", encoding="utf-8")
+
+    resolver = PresetResolver(tmp_path)
+
+    # The shared lookup resolves it, and the eligibility check agrees.
+    assert resolver._conventional_resource(pack, "speckit.lower.extra", "command") == body
+    assert resolver._has_concrete_resource(pack, "speckit.lower.extra", "command")
+
+    # The neighbouring conventional location keeps working.
+    (pack / "commands").mkdir()
+    flat = pack / "commands" / "speckit.lower.flat.md"
+    flat.write_text("---\ndescription: flat\n---\nFLAT BODY\n", encoding="utf-8")
+    assert resolver._conventional_resource(pack, "speckit.lower.flat", "command") == flat
+
+    # A missing resource stays missing.
+    assert resolver._conventional_resource(pack, "speckit.lower.absent", "command") is None

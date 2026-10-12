@@ -12,6 +12,7 @@ from .._installed_info_json import preset_info_item
 from .._installed_list_json import InstalledListJSONCommand, emit_json, emit_json_error
 from .._project import resolve_specify_project_root
 from ._commands import preset_app
+from ._manifest import PresetValidationError
 
 
 def _diagnostic_selector_matches(
@@ -117,6 +118,19 @@ def preset_info(
     # Check if installed locally first
     manager = PresetManager(project_root)
     local_pack = manager.get_pack(preset_id)
+    if local_pack is None and manager.registry.is_installed(preset_id):
+        # Installed but unreadable — for example a `regex:` selector rejected
+        # by the selector safety boundary. ``get_pack`` keeps its Optional
+        # contract so the listing/inventory paths stay usable, so surface the
+        # precise validation reason here rather than reporting the preset as
+        # missing.
+        from ._manifest import PresetManifest
+
+        try:
+            PresetManifest(manager.presets_dir / preset_id / "preset.yml")
+        except PresetValidationError as exc:
+            console.print(f"[red]Error:[/red] {_escape_markup(str(exc))}")
+            raise typer.Exit(1) from exc
 
     if local_pack:
         console.print(

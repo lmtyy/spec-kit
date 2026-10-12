@@ -3,6 +3,7 @@
 import copy
 import os
 import shutil
+import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Union
 
@@ -536,6 +537,95 @@ class _PresetSkillMethods:
         legacy_skill_name = f"speckit.{raw_short_name}"
         return modern_skill_name, legacy_skill_name
 
+    # 2 ** (n - 1) separator positions can be restored, so the candidate count
+    # doubles with every hyphen in a modern skill name. The cap bounds that
+    # enumeration, but a name past it is *reported*, never dropped in silence: a
+    # skill whose ownership cannot be resolved must not let the caller believe the
+    # disable cleaned up. Only names this rule could not have produced are skipped
+    # quietly.
+    _MAX_SKILL_NAME_COMPONENTS = 13
+    # Resolving each candidate against the real layers is what stops a wrong
+    # identity from being used, but it costs a resolver lookup per candidate. Past
+    # this many candidates the preference cannot pay for itself, so all
+    # round-tripping candidates are returned instead -- the conservative answer,
+    # never a smaller one.
+    _MAX_RESOLVED_CANDIDATES = 64
+
+    def _command_names_for_skill_names(
+        self, skill_names: List[str], resolver: Any
+    ) -> Set[str]:
+        """Return the command names a recorded skill name can belong to.
+
+        ``registered_skills`` is the only ownership record for a preset that wrote
+        skills, and it is also the only record that survives once the manifest can
+        no longer be read: a safety-rejected selector makes ``_get_manifest``
+        return ``None``, so the manifest declarations *and* selector-matched names
+        both come out empty. Disabling such a preset has to recover its command
+        names from the recorded skill names, or the installed skill stays active
+        while the registry reports the preset as disabled.
+
+        ``_skill_names_for_command`` maps ``speckit.a.b`` to the legacy name
+        ``speckit.a.b`` and the modern name ``speckit-a-b``. The legacy form
+        inverts exactly, so it is used as-is. The modern form does not invert at
+        all -- ``-`` and ``.`` both render as ``-`` -- so ``speckit-a-b`` may have
+        come from ``speckit.a.b`` *or* from ``speckit.a-b``. Candidates are
+        enumerated only as far as the ambiguity allows, and each one is accepted
+        only when it genuinely reproduces the recorded skill name through the real
+        registration rule. Nothing is inferred from string appearance alone.
+
+        Candidates that currently resolve to a real layer win; when none does (the
+        disabling provider was the only one) every round-tripping candidate is
+        returned so the orphaned output can still be retired.
+        """
+        round_trip: Set[str] = set()
+        for skill_name in skill_names:
+            if not isinstance(skill_name, str) or not skill_name:
+                continue
+            candidates: List[str] = []
+            if skill_name.startswith("speckit."):
+                # The legacy skill name of a command *is* the command name, so this
+                # form inverts exactly -- but only for shapes the rule can produce.
+                # "speckit.", "speckit.a." and "speckit..b" would otherwise be
+                # accepted as concrete command names that no rule ever generated.
+                tail = skill_name[len("speckit.") :]
+                if not tail or any(not part for part in tail.split(".")):
+                    continue
+                candidates.append(skill_name)
+            elif skill_name.startswith("speckit-"):
+                parts = skill_name[len("speckit-") :].split("-")
+                # 2 ** (n - 1) ways to put back the separators the name lost.
+                if not parts or any(not part for part in parts):
+                    continue
+                if len(parts) > self._MAX_SKILL_NAME_COMPONENTS:
+                    # Too ambiguous to enumerate safely. Report it: the skill is
+                    # still on disk and the disable cannot be reported as complete.
+                    warnings.warn(
+                        f"Recorded skill {skill_name!r} splits into {len(parts)} name "
+                        f"components, past the {self._MAX_SKILL_NAME_COMPONENTS}-component "
+                        "bound for resolving its command ownership. Its installed files "
+                        "may remain active; remove them manually or reinstall and "
+                        "disable the owning preset.",
+                        stacklevel=3,
+                    )
+                    continue
+                for mask in range(1 << (len(parts) - 1)):
+                    joined = parts[0]
+                    for index in range(1, len(parts)):
+                        joined += ("." if mask & (1 << (index - 1)) else "-") + parts[index]
+                    candidates.append(f"speckit.{joined}")
+            for candidate in candidates:
+                modern, legacy = self._skill_names_for_command(candidate)
+                if skill_name in (modern, legacy):
+                    round_trip.add(candidate)
+        if len(round_trip) > self._MAX_RESOLVED_CANDIDATES:
+            return round_trip
+        resolvable = {
+            candidate
+            for candidate in round_trip
+            if resolver.collect_all_layers(candidate, "command")
+        }
+        return resolvable or round_trip
+
     @staticmethod
     def _skill_title_from_command(cmd_name: str) -> str:
         """Return a human-friendly title for a skill command name."""
@@ -871,6 +961,26 @@ class _PresetSkillMethods:
 
                 skill_file = skill_subdir / "SKILL.md"
                 if skill_file not in materialized_outputs:
+                    foreign_owner = self._foreign_skill_owner(
+                        skill_file, manifest.id, registrar
+                    )
+                    if foreign_owner is not None:
+                        # Another preset, an extension or the user owns this
+                        # SKILL.md. Reconciliation reaches skills roots that
+                        # already hold their artifacts (the historical pass is
+                        # handed every recorded skills directory, and a legacy
+                        # project revisits the same roots once init-options is
+                        # gone), so writing here would silently replace someone
+                        # else's artifact with this preset's content. Skip it and
+                        # say so rather than take the file over.
+                        import warnings
+
+                        warnings.warn(
+                            f"Preset '{manifest.id}' skipped {skill_file}: it is "
+                            f"owned by '{foreign_owner}'.",
+                            stacklevel=2,
+                        )
+                        continue
                     _write_shared_text(skills_dir, skill_file, skill_content)
                 transaction = getattr(self, "_preset_install_skills", None)
                 if isinstance(transaction, dict):
@@ -883,6 +993,37 @@ class _PresetSkillMethods:
                 )
 
         return {selected_ai: written} if written else {}
+
+    def _foreign_skill_owner(
+        self, skill_file: Path, pack_id: str, registrar: Any
+    ) -> str | None:
+        """Return the declared owner of an existing SKILL.md when it is not ``pack_id``.
+
+        Ownership markers are namespaced (``<scheme>:<id>``). Spec Kit's own
+        schemes are ``preset:``, ``extension:``, and the bare template path a
+        bundled core skill carries (for example ``templates/commands/specify.md``,
+        which has no scheme). A file carrying any *other* scheme -- a
+        hand-maintained ``user:...`` file, or any future owner -- belongs to
+        somebody else: the historical reconciliation pass is handed every recorded
+        skills directory, so it can be pointed at a root that already holds such a
+        file, and replacing it would silently destroy another owner's artifact
+        while the CLI still reports success. This mirrors the ownership check the
+        removal path already applies before deleting a skill.
+        """
+        if not skill_file.is_file():
+            return None
+        try:
+            content = skill_file.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return None
+        frontmatter, _body = registrar.parse_frontmatter(content)
+        metadata = frontmatter.get("metadata")
+        source = metadata.get("source") if isinstance(metadata, dict) else None
+        if isinstance(source, str) and ":" in source:
+            scheme = source.split(":", 1)[0].strip().lower()
+            if scheme not in {"preset", "extension"}:
+                return source
+        return None
 
     def _infer_legacy_skill_provenance(
         self, skill_names: List[str], pack_id: str, fallback_agent: str
