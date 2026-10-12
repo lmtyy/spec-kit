@@ -5,6 +5,48 @@ import shutil
 import tempfile
 
 
+def refresh_journal_identities(project_root, roots=()):
+    """Record the current identity of the artifacts this operation wrote.
+
+    The integration journal compares the identity it stored for a path with the
+    file at rollback time; a record left behind as "did not exist" (what a writer
+    that is not itself journaled produces) reads as a concurrent edit, and the
+    transaction then keeps its recovery snapshots instead of completing its
+    rollback. Re-recording the final state of the artifacts named in ``roots``
+    keeps that view accurate.
+
+    Only those scopes are refreshed: every other journal entry keeps the identity
+    recorded when it was written, so a genuine concurrent edit elsewhere is still
+    reported as a conflict. Callers pass the paths the operation actually
+    materialized; an empty ``roots`` refreshes nothing.
+    """
+    from ..integrations._file_changes import after_file_change, file_change_observer
+
+    if not roots:
+        return
+    observer = file_change_observer.get()
+    journal = getattr(observer, "__self__", None) if observer is not None else None
+    if journal is None:
+        return
+    changes = getattr(journal, "changes", None)
+    if not hasattr(changes, "items"):
+        return
+    root = Path(project_root)
+    scopes = tuple(Path(item) for item in roots)
+    for path in list(changes):
+        try:
+            if not path.is_relative_to(root) or not path.exists():
+                continue
+            if not any(path == scope or path.is_relative_to(scope) for scope in scopes):
+                continue
+            after_file_change(path)
+        except Exception:  # noqa: BLE001 - bookkeeping refresh
+            # This runs from callers' ``finally`` blocks: a refresh that cannot be
+            # performed must never replace the install's own error, and the
+            # journal's conflict detection remains the safety net either way.
+            continue
+
+
 class _ArtifactSnapshot:
     """Back up exact artifact trees, including absent paths and symlinks."""
 
@@ -22,6 +64,9 @@ class _ArtifactSnapshot:
         # the backup link itself when the target is a directory).
         self._symlink_is_dir = {}
         self.retained_path = None
+        # Paths the last ``restore()`` actually put back, for callers that must
+        # tell a concurrent transaction those paths are already handled.
+        self.restored_paths: tuple = ()
 
     def capture(self, path):
         path = Path(path)
@@ -41,6 +86,10 @@ class _ArtifactSnapshot:
         elif path.exists():
             shutil.copy2(path, backup)
         self._paths[path] = backup
+
+    def captured_paths(self):
+        """The artifacts this snapshot captured, i.e. what its owner wrote."""
+        return tuple(self._paths)
 
     def retain(self):
         """Keep the backups for manual recovery after a failed restore.
@@ -64,6 +113,7 @@ class _ArtifactSnapshot:
 
     def restore(self):
         errors = []
+        restored = []
         for path, backup in self._paths.items():
             try:
                 if path.is_symlink() or path.is_file():
@@ -85,6 +135,8 @@ class _ArtifactSnapshot:
                     shutil.copy2(backup, path)
             except OSError as exc:
                 errors.append(f"{path}: {exc}")
+            else:
+                restored.append(path)
         for parent in sorted(
             self._absent_parents, key=lambda p: len(p.parts), reverse=True
         ):
@@ -93,6 +145,9 @@ class _ArtifactSnapshot:
                     parent.rmdir()
                 except OSError as exc:
                     errors.append(f"{parent}: {exc}")
+                else:
+                    restored.append(parent)
+        self.restored_paths = tuple(restored)
         if errors:
             # Retain the backups *before* raising: the failed paths may no
             # longer exist, so their backup copies are the only recovery source.

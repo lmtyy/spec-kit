@@ -6,6 +6,7 @@ import os
 from pathlib import PurePath
 
 import typer
+from rich.markup import escape
 
 from .._console import console
 from ..integration_runtime import (
@@ -26,6 +27,7 @@ from ._command_upgrade_layout import (
     _manifest_tracks_skill_layout,
 )
 from ._commands import integration_app
+from ._lifecycle import external_lifecycle, lifecycle_success
 from ._helpers import (
     _MANIFEST_READ_ERRORS,
     _SharedTemplateRefreshError,
@@ -46,21 +48,13 @@ from ._helpers import (
 
 
 @integration_app.command("upgrade")
+@external_lifecycle("upgrade")
 def integration_upgrade(
-    key: str | None = typer.Argument(
-        None, help="Integration key to upgrade (default: current integration)"
-    ),
-    force: bool = typer.Option(
-        False, "--force", help="Force upgrade even if files are modified"
-    ),
-    script: str | None = typer.Option(
-        None,
-        "--script",
-        help="Script type: sh, ps, or py (default: from init-options.json or platform default)",
-    ),
-    integration_options: str | None = typer.Option(
-        None, "--integration-options", help="Options for the integration"
-    ),
+    key: str | None = typer.Argument(None, help="Integration key to upgrade (default: current integration)"),
+    force: bool = typer.Option(False, "--force", help="Force upgrade even if files are modified"),
+    script: str | None = typer.Option(None, "--script", help="Script type: sh, ps, or py (default: from init-options.json or platform default)"),
+    integration_options: str | None = typer.Option(None, "--integration-options", help="Options for the integration"),
+    trust_integration: bool = typer.Option(False, "--trust-integration", help="Authorize executing a reviewed external integration update without prompting"),
 ):
     """Upgrade an integration by reinstalling with diff-aware file handling.
 
@@ -364,6 +358,7 @@ def integration_upgrade(
     if stale_keys:
         stale_manifest = IntegrationManifest(key, project_root, version="stale-cleanup")
         stale_manifest._files = {k: old_files[k] for k in stale_keys}
+        stale_manifest._ownership_modes = {k: old_manifest.ownership_modes[k] for k in stale_keys}
         # remove_manifest=False: this throwaway manifest shares ``key`` with the
         # real one just saved above (new_manifest.save()).  Letting uninstall()
         # delete ``{key}.manifest.json`` would wipe the freshly-written manifest
@@ -420,4 +415,4 @@ def integration_upgrade(
         )
 
     name = (integration.config or {}).get("name", key)
-    console.print(f"\n[green]✓[/green] Integration '{name}' upgraded successfully")
+    lifecycle_success(f"\n[green]✓[/green] Integration '{escape(str(name))}' upgraded successfully")

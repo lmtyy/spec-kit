@@ -15,6 +15,7 @@ from .._init_options import (
     resolve_active_agent_for_registration,
 )
 from ..extensions import ExtensionRegistry
+from ..integrations._file_changes import write_text as _write_text
 from ._manifest import PresetManifest, PresetValidationError
 from ._resolver import PresetResolver
 from ._selectors import is_regex_selector, selector_matches
@@ -485,13 +486,11 @@ class _PresetCommandMethods:
                             composed_dir = preset_dir / ".composed"
                             composed_dir.mkdir(parents=True, exist_ok=True)
                         composed_file = composed_dir / f"{cmd['name']}.md"
-                        composed_file.write_text(composed, encoding="utf-8")
-                        commands_to_register.append(
-                            {
-                                **cmd,
-                                "file": f".composed/{cmd['name']}.md",
-                            }
-                        )
+                        _write_text(composed_file, composed, encoding="utf-8")
+                        commands_to_register.append({
+                            **cmd,
+                            "file": f".composed/{cmd['name']}.md",
+                        })
                     else:
                         # No base layer to compose onto (e.g. the command it
                         # would wrap comes from an extension that isn't
@@ -522,11 +521,18 @@ class _PresetCommandMethods:
                 commands_to_register.append(cmd)
 
         try:
-            from ..agents import CommandRegistrar
+            registrar = self._command_registrar()
         except ImportError:
             return {}
 
-        class PresetRegistrar(CommandRegistrar):
+        # Upstream constructs registrars through ``_command_registrar()``
+        # (project_root set, generic agents excluded) and removed the local
+        # ``CommandRegistrar`` import from this scope. Subclass the object the
+        # factory just returned rather than re-importing the name: the only
+        # reason this subclass exists is the preset provenance stamp below,
+        # which upstream has no equivalent of (``agents.py`` never writes a
+        # ``metadata["source"]`` for presets).
+        class PresetRegistrar(type(registrar)):
             def render_skill_command(registrar_self, *args, **kwargs):
                 from ..integrations import get_integration
 
@@ -540,7 +546,9 @@ class _PresetCommandMethods:
                     content = integration.post_process_skill_content(content)
                 return content
 
-        registrar = PresetRegistrar()
+        # Same arguments as upstream's factory: a subclass built with defaults
+        # would silently fall back to project_root=None and include_generic=True.
+        registrar = PresetRegistrar(self.project_root, include_generic=False)
         transaction = getattr(self, "_preset_install_transaction", None)
         # Commands and skills are two ownership views of one native SKILL.md.
         # Keep the concrete destinations written in this pass so the skill
@@ -637,9 +645,7 @@ class _PresetCommandMethods:
         # for them by design, so this restriction only applies to
         # command-backed integrations.
         try:
-            from ..agents import CommandRegistrar
-
-            agent_config = CommandRegistrar().AGENT_CONFIGS.get(agent_name)
+            agent_config = self._command_registrar().AGENT_CONFIGS.get(agent_name)
         except ImportError:
             agent_config = None
         is_command_backed = (
@@ -1126,9 +1132,7 @@ class _PresetCommandMethods:
             return
 
         try:
-            from ..agents import CommandRegistrar
-
-            registrar = CommandRegistrar()
+            registrar = self._command_registrar()
             agent_config = registrar.AGENT_CONFIGS.get(agent_name)
         except ImportError:
             registrar = None
@@ -1244,11 +1248,9 @@ class _PresetCommandMethods:
             registered_commands: Dict mapping agent names to command name lists
         """
         try:
-            from ..agents import CommandRegistrar
+            registrar = self._command_registrar()
         except ImportError:
             return
-
-        registrar = CommandRegistrar()
         registrar.unregister_commands(registered_commands, self.project_root)
 
     def _merge_pack_registered_commands(
@@ -1368,12 +1370,11 @@ class _PresetCommandMethods:
         # uncomposable stale file gets unregistered. Names with no remaining
         # layers explicitly retire tracked output.
         try:
-            from ..agents import CommandRegistrar
+            registrar = self._command_registrar()
         except ImportError:
             return set()
 
         resolver = PresetResolver(self.project_root)
-        registrar = CommandRegistrar()
         reconciled_commands: set[str] = set()
 
         def record_written(written: Dict[str, List[str]]) -> None:
@@ -1606,7 +1607,7 @@ class _PresetCommandMethods:
                             composed_dir = pack_dir / ".composed"
                             composed_dir.mkdir(parents=True, exist_ok=True)
                             composed_file = composed_dir / f"{cmd_name}.md"
-                            composed_file.write_text(composed, encoding="utf-8")
+                            _write_text(composed_file, composed, encoding="utf-8")
                             written = self._register_for_non_skill_agents(
                                 registrar,
                                 [
@@ -1633,7 +1634,7 @@ class _PresetCommandMethods:
                     shared_composed = self.presets_dir / ".composed"
                     shared_composed.mkdir(parents=True, exist_ok=True)
                     composed_file = shared_composed / f"{cmd_name}.md"
-                    composed_file.write_text(composed, encoding="utf-8")
+                    _write_text(composed_file, composed, encoding="utf-8")
                     source = layers[0]["source"]
                     if source.startswith("extension:"):
                         source_id = source.split(":", 1)[1].split(" ", 1)[0]

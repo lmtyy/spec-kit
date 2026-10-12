@@ -2,11 +2,9 @@
 
 import hashlib
 import json
-import os
 import shutil
 import copy
 import tempfile
-import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
@@ -34,7 +32,11 @@ from ._manifest import (
 from ._registry import PresetRegistry
 from ._resolver import PresetResolver
 from ._selectors import is_regex_selector, selector_matches
-from ._transaction import _ArtifactSnapshot, _capture_preset_artifacts
+from ._transaction import (
+    _ArtifactSnapshot,
+    _capture_preset_artifacts,
+    refresh_journal_identities,
+)
 
 _CONSTITUTION_PROVENANCE_FILE = ".constitution-template.json"
 _CONSTITUTION_SYNC_PRESET_ID = "constitution-sync"
@@ -183,6 +185,10 @@ class PresetManager(_PresetCommandMethods, _PresetSkillMethods):
         self.project_root = project_root
         self.presets_dir = project_root / ".specify" / "presets"
         self.registry = PresetRegistry(self.presets_dir)
+
+    def _command_registrar(self):
+        from ..agents import CommandRegistrar
+        return CommandRegistrar(self.project_root, include_generic=False)
 
     def check_compatibility(
         self, manifest: PresetManifest, speckit_version: str
@@ -417,17 +423,13 @@ class PresetManager(_PresetCommandMethods, _PresetSkillMethods):
                     f"Use 'specify preset remove {manifest.id}' first."
                 )
 
-        dest_dir = self.presets_dir / manifest.id
-        self.presets_dir.mkdir(parents=True, exist_ok=True)
-        stage_dir = self.presets_dir / f".{manifest.id}.stage-{uuid.uuid4().hex}"
-        try:
-            # Copy before touching the current install. A failed copy therefore
-            # cannot destroy either an existing preset or leave a partial one.
-            shutil.copytree(source_dir, stage_dir)
-        except Exception:
-            shutil.rmtree(stage_dir, ignore_errors=True)
-            raise
+        from ..integrations._file_changes import (
+            after_file_change,
+            before_file_change,
+            changing_file,
+        )
 
+        dest_dir = self.presets_dir / manifest.id
         previous_registry_data = copy.deepcopy(self.registry.data)
         snapshot = _ArtifactSnapshot()
         transaction_commands: dict[str, list[str]] = {}
@@ -448,11 +450,27 @@ class PresetManager(_PresetCommandMethods, _PresetSkillMethods):
             _capture_preset_artifacts(self, snapshot, extra_commands)
             snapshot.capture(dest_dir)
             captured = True
-            if was_installed:
-                self.remove(manifest.id)
-            if dest_dir.exists():
-                shutil.rmtree(dest_dir)
-            os.replace(stage_dir, dest_dir)
+            # Create the destination parent only now: the snapshot above recorded
+            # that it did not exist, so a failed install can remove it again. Made
+            # earlier, it looks pre-existing and no component owns its cleanup.
+            self.presets_dir.mkdir(parents=True, exist_ok=True)
+            # Upstream journals install-time file changes; keep them around the
+            # same operations the PR's staged install performs.
+            before_file_change(dest_dir, removal=True)
+            try:
+                if was_installed:
+                    self.remove(manifest.id)
+                if dest_dir.exists():
+                    with changing_file(dest_dir, removal=True):
+                        shutil.rmtree(dest_dir)
+                # Upstream's install contract -- and what its fault injection
+                # targets: the package is copied straight into its final
+                # destination, inside the journaled before/after window. A partial
+                # copy is still recoverable because the artifact snapshot above is
+                # captured before this point and restores dest_dir verbatim.
+                shutil.copytree(source_dir, dest_dir)
+            finally:
+                after_file_change(dest_dir)
 
             # Pre-register so composition can see the new priority layer.
             normalized_catalog_name = (
@@ -580,10 +598,38 @@ class PresetManager(_PresetCommandMethods, _PresetSkillMethods):
                     exc.add_note(f"Preset install {label} cleanup failed: {cleanup_exc}")
             self.registry.data = previous_registry_data
             if captured:
+                # Upstream's own recovery resets the observer before restoring, for
+                # the same reason: restoration must not be journalled as a new
+                # write. Otherwise the journal records the paths this restore
+                # touched as concurrent edits and skips cleaning their now-empty
+                # parents, leaving directories a failed install created behind.
+                from ..integrations._file_changes import file_change_observer
+
+                observer = file_change_observer.get()
+                journal = getattr(observer, "__self__", None) if observer is not None else None
+                observer_token = file_change_observer.set(None)
                 try:
                     snapshot.restore()
                 except Exception as rollback_exc:
                     exc.add_note(f"Preset install snapshot rollback failed: {rollback_exc}")
+                finally:
+                    file_change_observer.reset(observer_token)
+                if journal is not None:
+                    # The snapshot has already restored these paths. The journal must
+                    # not read its own recorded identities against them any more: it
+                    # would call the difference a concurrent edit, keep its recovery
+                    # backup, and skip the remainder of its rollback -- including
+                    # releasing the project root it created. Retiring the entries
+                    # hands that subtree back without changing the journal's rules,
+                    # and leaves everything outside the snapshot untouched.
+                    changes = getattr(journal, "changes", None)
+                    pending = getattr(journal, "pending", None)
+                    for path in snapshot.restored_paths:
+                        if hasattr(changes, "pop"):
+                            changes.pop(path, None)
+                        discard = getattr(pending, "discard", None)
+                        if discard is not None:
+                            discard(path)
             raise
         finally:
             for attribute, previous in (
@@ -594,7 +640,10 @@ class PresetManager(_PresetCommandMethods, _PresetSkillMethods):
                     delattr(self, attribute)
                 else:
                     setattr(self, attribute, previous)
-            shutil.rmtree(stage_dir, ignore_errors=True)
+            # The install's files are on disk (or were just rolled back): record
+            # their final identity so the journal's view of what this operation
+            # wrote stays accurate and its rollback is not read as a conflict.
+            refresh_journal_identities(self.project_root, roots=snapshot.captured_paths())
             import sys
 
             operation_exc = sys.exception()
@@ -914,7 +963,7 @@ class PresetManager(_PresetCommandMethods, _PresetSkillMethods):
         # winner for the current agent, leaving the inactive integration
         # with a missing/stale file (#2948).
         try:
-            from ..agents import CommandRegistrar as _CommandRegistrarForScope
+            _CommandRegistrarForScope = self._command_registrar()
         except ImportError:
             _CommandRegistrarForScope = None
         affected_command_agents = {
@@ -1054,7 +1103,7 @@ class PresetManager(_PresetCommandMethods, _PresetSkillMethods):
                 restore_from_bundled_core=True,
             )
             try:
-                from ..agents import CommandRegistrar
+                CommandRegistrar = self._command_registrar()
             except ImportError:
                 CommandRegistrar = None
             if CommandRegistrar is not None:
