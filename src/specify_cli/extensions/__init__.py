@@ -2785,6 +2785,12 @@ class ExtensionManager:
                         pass
                     else:
                         artifact_snapshot.capture(skills_directory)
+                # Command-backed agents (Copilot) render a companion prompt beside the
+                # command; a rollback that unregisters the command deletes it, so it must
+                # be in the snapshot even when no preset winner was materialized.
+                prompts_directory = self.project_root / ".github" / "prompts"
+                if prompts_directory.is_dir():
+                    artifact_snapshot.capture(prompts_directory)
         except BaseException:
             artifact_snapshot.close()
             raise

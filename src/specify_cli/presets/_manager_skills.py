@@ -1727,6 +1727,16 @@ class _PresetSkillMethods:
                     skill_content = integration.post_process_skill_content(
                         skill_content
                     )
+                if not self._skill_write_is_proven(skill_file, skill_content):
+                    # The template was readable, but the destination is not verifiably
+                    # managed output: keep the user's file instead of writing layer
+                    # content over it.
+                    self._warn_unrestored_skill(
+                        skill_name,
+                        skill_file,
+                        ValueError("destination has no verified generation provenance"),
+                    )
+                    continue
                 _write_shared_text(skills_dir, skill_file, skill_content)
                 mutated_names.append(skill_name)
                 continue
@@ -1789,6 +1799,15 @@ class _PresetSkillMethods:
                     skill_content = integration.post_process_skill_content(
                         skill_content
                     )
+                if not self._skill_write_is_proven(skill_file, skill_content):
+                    # Readable extension source, but the destination is not verifiably
+                    # managed output: keep it rather than writing layer content over it.
+                    self._warn_unrestored_skill(
+                        skill_name,
+                        skill_file,
+                        ValueError("destination has no verified generation provenance"),
+                    )
+                    continue
                 _write_shared_text(skills_dir, skill_file, skill_content)
                 mutated_names.append(skill_name)
             else:
