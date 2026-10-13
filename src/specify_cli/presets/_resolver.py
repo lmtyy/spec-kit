@@ -13,6 +13,18 @@ from ._registry import PresetRegistry
 from ._selectors import is_regex_selector, selector_matches
 
 
+#: Conventional subdirectories per resource type.  ``templates/commands`` is a
+#: conventional lower-preset command location in its own right (the eligibility check and
+#: selector expansion both enumerate it), so resolution and layer collection must search
+#: it too -- otherwise a matched resource is eligible yet never offered as a layer, and a
+#: selector materializes nothing.
+_RESOURCE_SUBDIRS: dict[str, tuple[str, ...]] = {
+    "template": ("templates", ""),
+    "command": ("commands", "templates/commands"),
+    "script": ("scripts",),
+}
+
+
 class PresetResolver:
     """Resolves template names to file paths using a priority stack.
 
@@ -273,14 +285,7 @@ class PresetResolver:
             Path to the resolved template file, or None if not found
         """
         # Determine subdirectory based on template type
-        if template_type == "template":
-            subdirs = ["templates", ""]
-        elif template_type == "command":
-            subdirs = ["commands"]
-        elif template_type == "script":
-            subdirs = ["scripts"]
-        else:
-            subdirs = [""]
+        subdirs = list(_RESOURCE_SUBDIRS.get(template_type, ("",)))
 
         # Determine file extension based on template type
         ext = ".md"
@@ -671,11 +676,7 @@ class PresetResolver:
         # eligibility check that calls this method directly in agreement with
         # selector expansion; otherwise a matched resource is never offered as a
         # layer and the selector materializes nothing.
-        subdirs = {
-            "template": ("templates", ""),
-            "command": ("commands", "templates/commands"),
-            "script": ("scripts",),
-        }.get(template_type, ("",))
+        subdirs = _RESOURCE_SUBDIRS.get(template_type, ("",))
         extension = ".sh" if template_type == "script" else ".md"
         for subdir in subdirs:
             candidate = (
@@ -726,14 +727,7 @@ class PresetResolver:
         Returns:
             List of layer dicts ordered highest-to-lowest priority.
         """
-        if template_type == "template":
-            subdirs = ["templates", ""]
-        elif template_type == "command":
-            subdirs = ["commands"]
-        elif template_type == "script":
-            subdirs = ["scripts"]
-        else:
-            subdirs = [""]
+        subdirs = list(_RESOURCE_SUBDIRS.get(template_type, ("",)))
 
         ext = ".md"
         if template_type == "script":

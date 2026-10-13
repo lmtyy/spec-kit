@@ -312,11 +312,23 @@ def _restore_snapshots(root: Path, journal: _FileJournal) -> list[Path]:
         # though every file was restored. Remove only empty directories, deepest
         # first: anything that still holds data is left exactly as it is, and a
         # root this operation did not create is never touched.
-        for directory in sorted(
-            (item for item in root.rglob("*") if item.is_dir() and not item.is_symlink()),
-            key=lambda item: len(item.parts),
-            reverse=True,
-        ):
+        try:
+            empty_dirs = sorted(
+                (
+                    item
+                    for item in root.rglob("*")
+                    if item.is_dir() and not item.is_symlink()
+                ),
+                key=lambda item: len(item.parts),
+                reverse=True,
+            )
+        except OSError:
+            # Enumerating a root that vanished or became unreadable is the same kind of
+            # best-effort failure as the per-directory ``rmdir`` below: this cleanup runs
+            # inside an exception handler and must never replace the operation's own
+            # error with a traversal error of its own.
+            empty_dirs = []
+        for directory in empty_dirs:
             try:
                 directory.rmdir()
             except OSError:

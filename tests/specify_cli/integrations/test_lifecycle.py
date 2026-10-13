@@ -80,3 +80,33 @@ def test_directory_identity_ignores_only_new_empty_destination_parents(tmp_path,
     assert _matches_directory_before_write(
         _file_identity(package), expected, (".cache", "nested"),
     ) == (change == "none")
+
+
+def test_restore_snapshots_traversal_failure_keeps_original_error(tmp_path, monkeypatch):
+    """An unreadable or vanishing root must not replace the operation's own exception.
+
+    The released-root cleanup enumerates the tree from inside an exception handler, so a
+    traversal error there would mask the failure that triggered the rollback.
+    """
+    from specify_cli.integrations import _lifecycle
+
+    root = tmp_path / "project"
+    root.mkdir()
+
+    class _Journal:
+        changes: dict = {}
+        pending: set = set()
+        directory_states: dict = {}
+
+        def safe_path(self, path):
+            return path
+
+    def boom(self, *args, **kwargs):
+        raise OSError("root vanished during cleanup")
+
+    token = _lifecycle._init_directory.set((str(root), False))
+    try:
+        monkeypatch.setattr(type(root), "rglob", boom, raising=True)
+        assert _lifecycle._restore_snapshots(root, _Journal()) == []
+    finally:
+        _lifecycle._init_directory.reset(token)

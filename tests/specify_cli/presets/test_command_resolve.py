@@ -274,3 +274,64 @@ class TestPresetResolve:
         by_source = {layer["source"]: layer for layer in layers}
         assert by_source["sel-pack v1.0.0"]["declaration"] == "regex:^spec-.*$"
         assert by_source["exact-pack v1.0.0"]["declaration"] == "spec-template"
+
+
+def test_templates_commands_location_contributes_a_layer(tmp_path):
+    """A lower preset shipping only ``templates/commands/<name>.md`` still resolves.
+
+    Regression (review): the eligibility check learned about that conventional location
+    but ``collect_all_layers`` (and the resolution built on it) did not, so a matched
+    resource counted as eligible yet contributed no layer and a selector materialized
+    nothing.  Asserted through the public paths, not the private helper.
+    """
+    import yaml
+
+    from specify_cli.presets import PresetManager, PresetResolver
+
+    root = tmp_path / "project"
+    (root / ".specify").mkdir(parents=True)
+    source = tmp_path / "lower-preset"
+    (source / "templates" / "commands").mkdir(parents=True)
+    # Undeclared: a lower preset that merely ships the conventional location, which the
+    # eligibility check enumerates without a manifest declaration.
+    (source / "templates" / "commands" / "speckit.lower.hello.md").write_text(
+        "---\ndescription: Lower\n---\n\nLOWER BODY\n", encoding="utf-8"
+    )
+    (source / "commands").mkdir(parents=True)
+    (source / "commands" / "speckit.lower.declared.md").write_text(
+        "---\ndescription: Declared\n---\n\nDECLARED BODY\n", encoding="utf-8"
+    )
+    (source / "preset.yml").write_text(
+        yaml.dump(
+            {
+                "schema_version": "1.0",
+                "preset": {
+                    "id": "lower",
+                    "name": "Lower",
+                    "version": "1.0.0",
+                    "description": "Lower",
+                },
+                "requires": {"speckit_version": ">=0.1.0"},
+                "provides": {
+                    "templates": [
+                        {
+                            "type": "command",
+                            "name": "speckit.lower.declared",
+                            "file": "commands/speckit.lower.declared.md",
+                        }
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    PresetManager(root).install_from_directory(source, "0.1.5", priority=20)
+
+    resolver = PresetResolver(root)
+    layers = resolver.collect_all_layers("speckit.lower.hello", "command")
+    assert layers, (
+        "a lower preset providing only templates/commands/<name>.md must contribute a "
+        "layer, otherwise a regex selector matching it materializes nothing"
+    )
+    resolved = resolver.resolve_content("speckit.lower.hello", "command")
+    assert resolved is not None and "LOWER BODY" in resolved
