@@ -18,6 +18,11 @@ from ..integrations._registration import project_registration
 from ._manager_commands import _substitute_core_template
 from ._manifest import PresetManifest, PresetValidationError
 from ._resolver import PresetResolver
+from ..ownership import (
+    generated_this_operation,
+    is_managed_output,
+    transactional_writes_active,
+)
 from ._selectors import is_regex_selector
 
 
@@ -980,6 +985,15 @@ class _PresetSkillMethods:
                             stacklevel=2,
                         )
                         continue
+                    if not self._skill_write_is_proven(skill_file, skill_content):
+                        import warnings
+
+                        warnings.warn(
+                            f"Preset '{manifest.id}' kept {skill_file}: no verified "
+                            "generation provenance.",
+                            stacklevel=2,
+                        )
+                        continue
                     _write_shared_text(skills_dir, skill_file, skill_content)
                 transaction = getattr(self, "_preset_install_skills", None)
                 if isinstance(transaction, dict):
@@ -992,6 +1006,32 @@ class _PresetSkillMethods:
                 )
 
         return {selected_ai: written} if written else {}
+
+    def _skill_write_is_proven(self, skill_file: Path, rendered: str) -> bool:
+        """Positive provenance required before an existing SKILL.md is replaced.
+
+        A file this operation generated, a byte-identical render, and output carrying a
+        recognised managed marker are legitimate to take over.  Anything else -- a skill
+        the user authored or edited -- is kept.  Symlinked destinations are left to the
+        writer's own strict validation.
+        """
+        if transactional_writes_active():
+            # Inside an install transaction the destination's prior bytes are recorded
+            # for exact rollback, so taking the path over is reversible.
+            return True
+        if generated_this_operation(skill_file):
+            return True
+        if not skill_file.exists():
+            return True
+        if skill_file.is_symlink():
+            return True
+        try:
+            current = skill_file.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return False
+        if current == rendered:
+            return True
+        return is_managed_output(current, "markdown")
 
     def _foreign_skill_owner(
         self, skill_file: Path, pack_id: str, registrar: Any

@@ -264,7 +264,11 @@ def test_legacy_refresh_still_reclaims_its_own_skill_and_supersedes_core(
     assert "preset:selector" in skill.read_text(encoding="utf-8")
     assert "SELECTOR BODY" in skill.read_text(encoding="utf-8")
 
-    # Marker-less file (the shape a bundled core skill has): still overridable.
-    skill.write_text("---\ndescription: core\n---\nCORE BODY\n", encoding="utf-8")
+    # A bundled core skill: rendered by the core layer, so it carries the repo-relative
+    # source that layer stamps (see test_manager_skills.py's core->skill assertion).
+    skill.write_text(
+        "---\ndescription: core\nsource: templates/commands/provider.md\n---\nCORE BODY\n",
+        encoding="utf-8",
+    )
     _refresh_presets_and_warn(root, {COMMAND}, strict=True)
     assert "SELECTOR BODY" in skill.read_text(encoding="utf-8")

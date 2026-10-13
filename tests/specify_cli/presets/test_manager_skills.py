@@ -1096,6 +1096,52 @@ class TestPresetSkills(PresetArtifactTestHelpers):
         metadata = manager.registry.get("self-test")
         assert "speckit.specify" in metadata.get("registered_skills", {}).get("kimi", [])
 
+    def test_refresh_keeps_a_skill_the_user_replaced(self, project_dir, temp_dir):
+        """A refresh must not destroy the user's replacement of a generated skill.
+
+        Regression: the registration path treated a marker-less file as writable, so
+        re-registering an enabled preset overwrote whatever the user had put there.
+        """
+        self._write_init_options(project_dir, ai="copilot", ai_skills=True)
+        manager = PresetManager(project_dir)
+        manager.install_from_directory(
+            self._create_command_preset(
+                temp_dir, "demo", "speckit.demo.hello", "Demo", "DEMO BODY"
+            ),
+            "0.1.5",
+        )
+        manager.register_enabled_presets_for_agent("copilot")
+        skill_file = project_dir / ".github" / "skills" / "speckit-demo-hello" / "SKILL.md"
+        assert "preset:demo" in skill_file.read_text(encoding="utf-8")
+
+        skill_file.write_text("MY OWN SKILL\n", encoding="utf-8")
+        PresetManager(project_dir).register_enabled_presets_for_agent("copilot")
+
+        assert skill_file.read_text(encoding="utf-8") == "MY OWN SKILL\n", (
+            "the user's replacement must survive a refresh: only output we can prove we "
+            "generated may be taken over"
+        )
+
+    def test_refresh_still_updates_its_own_generated_skill(self, project_dir, temp_dir):
+        """The positive half: output we generated is still refreshed."""
+        self._write_init_options(project_dir, ai="copilot", ai_skills=True)
+        manager = PresetManager(project_dir)
+        manager.install_from_directory(
+            self._create_command_preset(
+                temp_dir, "demo", "speckit.demo.hello", "Demo", "DEMO BODY"
+            ),
+            "0.1.5",
+        )
+        manager.register_enabled_presets_for_agent("copilot")
+        skill_file = project_dir / ".github" / "skills" / "speckit-demo-hello" / "SKILL.md"
+        # An older render of ours: still marker-verified, different bytes.
+        skill_file.write_text(
+            "---\nname: speckit-demo-hello\nsource: preset:demo\n---\n\nOLD RENDER\n",
+            encoding="utf-8",
+        )
+        PresetManager(project_dir).register_enabled_presets_for_agent("copilot")
+        assert "DEMO BODY" in skill_file.read_text(encoding="utf-8")
+
     def test_kimi_legacy_dotted_skill_reconciles_priority_winner(
         self, project_dir, temp_dir
     ):
@@ -1131,8 +1177,11 @@ class TestPresetSkills(PresetArtifactTestHelpers):
                 preset_id,
                 {"registered_skills": {"kimi": ["speckit.specify"]}},
             )
+        # The lower preset wrote this file: it carries that preset's marker, which is
+        # what lets reconciliation hand the directory to the higher-priority winner.
         skill_file.write_text(
-            "---\nname: speckit.specify\n---\n\nLower body\n",
+            "---\nname: speckit.specify\nsource: preset:lower-kimi-preset\n---\n"
+            "\nLower body\n",
             encoding="utf-8",
         )
         manager._reconcile_skills(["speckit.specify"])
@@ -2484,7 +2533,10 @@ class TestPresetSkills(PresetArtifactTestHelpers):
         """Unknown registry agent keys must not fall back to shared skills."""
         shared_skills_dir = project_dir / ".agents" / "skills"
         skill_dir = self._create_skill(
-            shared_skills_dir, "speckit-specify", "user-owned content"
+            shared_skills_dir,
+            "speckit-specify",
+            "user-owned content",
+            source=None,
         )
         core_commands = project_dir / ".specify" / "templates" / "commands"
         (core_commands / "specify.md").write_text(
@@ -2508,7 +2560,7 @@ class TestPresetSkills(PresetArtifactTestHelpers):
         self._write_init_options(project_dir, ai="claude", ai_skills=True)
         skills_dir = project_dir / ".claude" / "skills"
         skill_dir = self._create_skill(
-            skills_dir, "speckit-specify", "user-owned content"
+            skills_dir, "speckit-specify", "user-owned content", source=None
         )
         core_commands = project_dir / ".specify" / "templates" / "commands"
         (core_commands / "specify.md").write_text(
@@ -2543,7 +2595,7 @@ class TestPresetSkills(PresetArtifactTestHelpers):
         self._write_init_options(project_dir, ai="claude", ai_skills=True)
         skills_dir = project_dir / ".claude" / "skills"
         skill_dir = self._create_skill(
-            skills_dir, "speckit-specify", "installed content"
+            skills_dir, "speckit-specify", "installed content", source=None
         )
         core_commands = project_dir / ".specify" / "templates" / "commands"
         core_commands.mkdir(parents=True, exist_ok=True)
@@ -2580,7 +2632,7 @@ class TestPresetSkills(PresetArtifactTestHelpers):
         self._write_init_options(project_dir, ai="claude", ai_skills=True)
         skills_dir = project_dir / ".claude" / "skills"
         skill_dir = self._create_skill(
-            skills_dir, "speckit-specify", "installed content"
+            skills_dir, "speckit-specify", "installed content", source=None
         )
         core_commands = project_dir / ".specify" / "templates" / "commands"
         core_commands.mkdir(parents=True, exist_ok=True)
@@ -2626,7 +2678,7 @@ class TestPresetSkills(PresetArtifactTestHelpers):
         self._write_init_options(project_dir, ai="claude", ai_skills=True)
         skills_dir = project_dir / ".claude" / "skills"
         skill_dir = self._create_skill(
-            skills_dir, "speckit-fakeext-cmd", "installed content"
+            skills_dir, "speckit-fakeext-cmd", "installed content", source=None
         )
 
         extension_dir = project_dir / ".specify" / "extensions" / "fakeext"

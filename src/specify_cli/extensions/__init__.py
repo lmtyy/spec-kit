@@ -2685,6 +2685,7 @@ class ExtensionManager:
 
         return True
 
+    @transactional_artifact_writes
     def install_from_directory(
         self,
         source_dir: Path,

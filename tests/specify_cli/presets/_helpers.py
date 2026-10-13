@@ -136,12 +136,15 @@ class PresetArtifactTestHelpers:
 
         save_init_options(project_dir, {"ai": ai, "ai_skills": ai_skills, "script": script})
 
-    def _create_skill(self, skills_dir, skill_name, body="original body"):
+    def _create_skill(
+        self, skills_dir, skill_name, body="original body", source="templates/skills/{name}.md"
+    ):
         skill_dir = skills_dir / skill_name
         skill_dir.mkdir(parents=True, exist_ok=True)
-        (skill_dir / "SKILL.md").write_text(
-            f"---\nname: {skill_name}\n---\n\n{body}\n"
-        )
+        # ``source=None`` writes the unowned shape the negative tests exercise; the
+        # default carries the repo-relative source the bundled core layer stamps.
+        claim = "" if source is None else f"source: {source.format(name=skill_name)}\n"
+        (skill_dir / "SKILL.md").write_text(f"---\nname: {skill_name}\n{claim}---\n\n{body}\n")
         return skill_dir
 
     def _create_command_preset(self, temp_dir, preset_id, command_name, description, body):
