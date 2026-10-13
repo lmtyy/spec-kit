@@ -225,6 +225,29 @@ def test_user_looking_values_are_not_recognised(value):
     assert not is_managed_output(f"---\nsource: {value}\n---\n")
 
 
+
+
+_YAML_SCALAR_CASES = [
+    # An unindented marker inside a multi-line quoted scalar is the value's text.
+    ('prompt: "first\n# Source: demo\nlast"\n', False),
+    ("prompt: 'first\n# Source: demo\nlast'\n", False),
+    # A genuine footer after a closed scalar is provenance.
+    ('prompt: "hello"\n# Source: demo\n', True),
+    ("prompt: 'hello'\n# Source: demo\n", True),
+    # A block scalar keeps its indented marker as body text.
+    ("prompt: |\n  user text\n  # Source: demo\n", False),
+]
+
+
+@pytest.mark.parametrize("text,expected", _YAML_SCALAR_CASES)
+def test_yaml_scalar_text_is_not_provenance(text, expected):
+    """A marker inside a YAML scalar is the value's text, not an ownership claim.
+
+    Regression (review F3): a multi-line quoted ``prompt: "..."`` leaked its contents
+    into the header region and the footer scan, so the marker inside it counted.
+    """
+    assert is_managed_output(text, "yaml") is expected
+
 def test_comment_markers_are_recognised():
     """The comment forms the writers emit are recognised.
 

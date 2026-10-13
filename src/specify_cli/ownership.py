@@ -267,8 +267,13 @@ def _split_header(text: str, style: str) -> tuple[list[str], list[str]]:
                 index += 1
                 break
     pre_body: list[str] = []
-    for line in lines[index:]:
+    # A line that begins inside a quoted scalar is that scalar's text, not a header entry:
+    # the `prompt: "first` form spans lines, and its contents must not be read as markers.
+    inside_scalar = _quoted_scalar_spans(lines[index:]) if style != "markdown" else []
+    for offset, line in enumerate(lines[index:]):
         stripped = line.strip()
+        if style != "markdown" and inside_scalar[offset]:
+            break
         if style == "markdown":
             if stripped and not stripped.startswith("<!--"):
                 break
@@ -288,15 +293,51 @@ def _split_header(text: str, style: str) -> tuple[list[str], list[str]]:
     return frontmatter, pre_body
 
 
+def _quoted_scalar_spans(lines: Sequence[str]) -> list[bool]:
+    """Per line, whether the cursor is inside a quoted scalar at the line's start.
+
+    A ``# Source:`` line inside a YAML single- or double-quoted scalar is the value's
+    text, not a comment, so a footer scan must not treat it as provenance.  Handles the
+    ``\\"`` escape inside double-quoted scalars and the doubled quote (``''``/``""``)
+    YAML uses inside single-quoted ones.
+    """
+    spans: list[bool] = []
+    quote: str | None = None
+    for line in lines:
+        spans.append(quote is not None)
+        index = 0
+        while index < len(line):
+            ch = line[index]
+            if quote is None:
+                if ch in ("'", '"'):
+                    quote = ch
+                elif ch == "#":
+                    break
+            elif quote == '"' and ch == "\\":
+                index += 2
+                continue
+            elif ch == quote:
+                if index + 1 < len(line) and line[index + 1] == quote:
+                    index += 2
+                    continue
+                quote = None
+            index += 1
+    return spans
+
+
 def _footer_comment_lines(text: str) -> set[str]:
     """Trailing comment lines, where the Goose YAML writer stamps its source.
 
     The Goose renderer writes ``# Source: <id>`` *after* the prompt, so that single
     documented footer position is accepted too.  A non-comment line above it ends the
-    scan, so a marker inside the recipe body is never provenance.
+    scan, and a line that begins inside a quoted scalar (a multi-line ``prompt: "..."``)
+    is value text, so a marker there is never provenance.
     """
+    lines = text.splitlines()
+    inside = _quoted_scalar_spans(lines)
     footer: list[str] = []
-    for line in reversed(text.splitlines()):
+    for position in range(len(lines) - 1, -1, -1):
+        line = lines[position]
         stripped = line.strip()
         if not stripped:
             if footer:
@@ -304,8 +345,7 @@ def _footer_comment_lines(text: str) -> set[str]:
             continue
         if not stripped.startswith(_COMMENT_PREFIXES):
             break
-        if line[:1].isspace():
-            # Inside a block scalar: an indented ``# Source:`` line is the prompt's text.
+        if line[:1].isspace() or inside[position]:
             break
         footer.append(line)
     return {line.strip() for line in footer}
