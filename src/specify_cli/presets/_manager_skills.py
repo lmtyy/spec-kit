@@ -1018,6 +1018,23 @@ class _PresetSkillMethods:
 
         return {selected_ai: written} if written else {}
 
+    def _skill_delete_is_proven(self, skill_file: Path) -> bool:
+        """True when removing this skill file cannot destroy the user's content.
+
+        Deletion needs the same positive provenance as a write: a file this operation
+        generated, a destination inside an install transaction, or output that still
+        carries a recognised managed marker.  An unmarked file is the user's.
+        """
+        if transactional_writes_active() or generated_this_operation(skill_file):
+            return True
+        if skill_file.is_symlink():
+            return False
+        try:
+            current = skill_file.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return False
+        return is_managed_output(current, "markdown")
+
     def _skill_write_is_proven(self, skill_file: Path, rendered: str) -> bool:
         """Positive provenance required before an existing SKILL.md is replaced.
 
@@ -1811,8 +1828,17 @@ class _PresetSkillMethods:
                 _write_shared_text(skills_dir, skill_file, skill_content)
                 mutated_names.append(skill_name)
             else:
-                # No core or extension template — remove the skill's own file and
-                # leave anything the user added beside it in place.
+                # No core or extension template — remove the skill's own file, but only
+                # while it is still verifiably ours: an unmarked file is the user's and
+                # deleting it would destroy their content.  Anything they added beside it
+                # is left in place either way.
+                if not self._skill_delete_is_proven(skill_file):
+                    self._warn_unrestored_skill(
+                        skill_name,
+                        skill_file,
+                        ValueError("no verified generation provenance for removal"),
+                    )
+                    continue
                 from ..integrations._file_changes import after_file_change, before_file_change
 
                 before_file_change(skill_file, removal=True)
