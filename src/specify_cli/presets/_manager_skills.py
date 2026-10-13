@@ -306,6 +306,17 @@ class _PresetSkillMethods:
                             skill_content = integration.post_process_skill_content(
                                 skill_content
                             )
+                        if not self._skill_write_is_proven(
+                            skill_subdir / "SKILL.md", skill_content
+                        ):
+                            import warnings
+
+                            warnings.warn(
+                                f"Kept {skill_subdir / 'SKILL.md'}: no verified "
+                                "generation provenance.",
+                                stacklevel=2,
+                            )
+                            continue
                         _write_shared_text(
                             skills_dir,
                             skill_subdir / "SKILL.md",
