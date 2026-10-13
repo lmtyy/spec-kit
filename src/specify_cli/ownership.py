@@ -33,8 +33,6 @@ from typing import Sequence
 
 import yaml
 
-from ._utils import relative_extension_path_violation
-
 # A depth counter, not a flag: overlapping (not just nested) uses must not turn the
 # exemption off for each other, and a counter needs no token to reset.
 _TRANSACTIONAL_DEPTH: contextvars.ContextVar[int] = contextvars.ContextVar(
@@ -93,12 +91,9 @@ def note_generated_write(path, content: str | None = None) -> None:
     key = str(Path(path))
     if content is None:
         try:
-            # Hash the bytes on disk rather than a decoded view of them, so a newline
-            # translation in the reading path cannot fake a match.
-            current[key] = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+            content = Path(path).read_text(encoding="utf-8", errors="replace")
         except (OSError, TypeError, ValueError):
             return
-        return
     try:
         current[key] = hashlib.sha256(content.encode("utf-8")).hexdigest()
     except (TypeError, ValueError):
@@ -159,19 +154,8 @@ def is_managed_output(text: str, style: str = "markdown") -> bool:
         if not _is_complete_comment(line):
             continue
         for marker in _MANAGED_COMMENT_MARKERS:
-            if not line.startswith(marker):
-                continue
-            if marker.startswith("<!-- Config"):
-                # A fixed path form, emitted verbatim by the writer.
+            if line.startswith(marker):
                 return True
-            remainder = line[len(marker):].strip()
-            if remainder.endswith("-->"):
-                remainder = remainder[:-3].strip()
-            # ``<!-- Source: https://example/a.md -->`` is prose, not provenance.
-            return _is_ownership_value(remainder) or bool(
-                re.fullmatch(r"(?:" + "|".join(_SCHEMES) + r"):" + _OWNER_ID, remainder)
-            )
-    return False
     for value in _frontmatter_values("\n".join(frontmatter)):
         if _is_ownership_value(value):
             return True
@@ -180,48 +164,36 @@ def is_managed_output(text: str, style: str = "markdown") -> bool:
 
 #: An identifier a writer can emit: no separators, no whitespace, no path syntax.
 _OWNER_ID = r"[A-Za-z0-9][\w.\-]*"
-#: Prefixes the real writers stamp on a bare (core/template) render path.
-_WRITER_PATH_PREFIXES = ("templates/",)
-
-
-def _path_part_is_safe(value: str) -> bool:
-    """True when *value* is an artifact path the writers' own policy accepts.
-
-    Delegating to the shared validator keeps recognition from drifting away from what a
-    writer may emit: spaces, upper-case suffixes and any extension are legal there.
-    """
-    if not value or relative_extension_path_violation(value) is not None:
-        return False
-    return "/" in value
+#: ``<scheme>:<id>`` or ``<scheme>:<id>:<file>`` from the reserved vocabulary.
+_RESERVED_VALUE = re.compile(
+    r"^(?:" + "|".join(_SCHEMES) + r"):" + _OWNER_ID + r"(?::[\w./\-]+)?$"
+)
+#: ``<id>:<relative artifact path>`` -- the composite the native-skill writers emit.
+_COMPOSITE_VALUE = re.compile(
+    _OWNER_ID + r":[\w][\w./\-]*\.(?:md|markdown|toml|ya?ml)$"
+)
+#: The core layer's own stamp: a repo-relative render path and nothing else.
+_CORE_VALUE = re.compile(r"^[\w][\w./\-]*/[\w.\-]+\.(?:md|markdown|toml|ya?ml)$")
 
 
 def _is_ownership_value(value: str) -> bool:
     """True only for marker values this project's writers actually emit.
 
-    A URL, an absolute or Windows path (including drive-relative ``C:foo``), a ``..``
-    traversal, or other prose that merely contains a colon is not an ownership claim;
-    accepting one would let a user's own file be mistaken for generated output.
+    A URL, an absolute or Windows path, a ``..`` traversal, or other prose that merely
+    contains a colon is not an ownership claim; accepting one would let a user's own
+    file be mistaken for generated output.
     """
-    if not value or "://" in value:
+    if not value or "://" in value or ".." in value.split("/"):
         return False
-    scheme, separator, rest = value.partition(":")
-    if separator and scheme in _SCHEMES:
-        # ``<scheme>:<id>`` or ``<scheme>:<id>:<path>``: the path half must pass the
-        # writers' own path policy, so ``preset:demo:../user.md`` is not a claim.
-        owner, _, path = rest.partition(":")
-        if not re.fullmatch(_OWNER_ID, owner):
-            return False
-        return not path or _path_part_is_safe(path)
-    if (
-        separator
-        and len(scheme) > 1
-        and re.fullmatch(_OWNER_ID, scheme)
-        and _path_part_is_safe(rest)
-    ):
-        # ``<id>:<artifact path>`` -- the composite the native-skill writers emit.
+    if value.startswith(("/", "\\")) or re.match(r"^[A-Za-z]:[\\/]", value):
+        return False
+    if _RESERVED_VALUE.match(value):
         return True
-    if _path_part_is_safe(value) and value.startswith(_WRITER_PATH_PREFIXES):
-        # The core layer's own stamp: a render path under the templates tree.
+    if value.partition(":")[0] in _SCHEMES:
+        return False
+    if _COMPOSITE_VALUE.match(value):
+        return True
+    if _CORE_VALUE.match(value):
         return True
     # A bare identifier is the legacy marker form the writers still stamp.
     return bool(re.fullmatch(_OWNER_ID, value))
