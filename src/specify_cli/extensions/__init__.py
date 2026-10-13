@@ -2787,10 +2787,13 @@ class ExtensionManager:
                         artifact_snapshot.capture(skills_directory)
                 # Command-backed agents (Copilot) render a companion prompt beside the
                 # command; a rollback that unregisters the command deletes it, so it must
-                # be in the snapshot even when no preset winner was materialized.
-                prompts_directory = self.project_root / ".github" / "prompts"
-                if prompts_directory.is_dir():
-                    artifact_snapshot.capture(prompts_directory)
+                # be in the snapshot even when no preset winner was materialized.  Only do
+                # this for the agent that writes prompts: making an unrelated prompt tree
+                # a prerequisite would fail installs that never touch it.
+                if resolve_active_agent_for_registration(self.project_root) == "copilot":
+                    prompts_directory = self.project_root / ".github" / "prompts"
+                    if prompts_directory.is_dir():
+                        artifact_snapshot.capture(prompts_directory)
         except BaseException:
             artifact_snapshot.close()
             raise

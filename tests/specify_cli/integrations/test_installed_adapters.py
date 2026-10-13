@@ -3023,7 +3023,7 @@ def test_round3_managers_snapshot_the_requested_project_atomically(tmp_path, ser
         assert not first_leaf.exists()
         # The other project's file must be untouched byte for byte, not merely still
         # containing its body: a rewritten header or appended text is corruption too.
-        assert other_leaf.read_text(encoding="utf-8") == owned_output
+        assert other_leaf.read_bytes() == owned_output.encode("utf-8")
 
 
 @pytest.mark.parametrize("operation", ["add", "remove", "enable", "disable"])
