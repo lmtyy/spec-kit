@@ -304,6 +304,8 @@ def _restore_snapshots(root: Path, journal: _FileJournal) -> list[Path]:
         # operation's own error. Without the evidence, nothing is removed.
         created_root = False
     if created_root:
+        from .._utils import is_link_like
+
         # ``_init_directory`` recorded that this root did not exist when the
         # operation began, so every directory still inside it belongs to this
         # operation. A restore can leave one behind empty -- a directory the
@@ -313,15 +315,22 @@ def _restore_snapshots(root: Path, journal: _FileJournal) -> list[Path]:
         # first: anything that still holds data is left exactly as it is, and a
         # root this operation did not create is never touched.
         try:
-            empty_dirs = sorted(
-                (
-                    item
-                    for item in root.rglob("*")
-                    if item.is_dir() and not item.is_symlink()
-                ),
-                key=lambda item: len(item.parts),
-                reverse=True,
-            )
+            empty_dirs: list[Path] = []
+            # Walk explicitly rather than ``rglob``: a Windows directory junction is not a
+            # symlink, so a recursive glob descends into it and would let this cleanup
+            # remove empty directories *outside* the operation's own tree.  Pruning the
+            # walk is what stops the descent.
+            for current, dirnames, _files in os.walk(root, followlinks=False):
+                current_path = Path(current)
+                keep: list[str] = []
+                for name in dirnames:
+                    child = current_path / name
+                    if is_link_like(child):
+                        continue
+                    keep.append(name)
+                    empty_dirs.append(child)
+                dirnames[:] = keep
+            empty_dirs.sort(key=lambda item: len(item.parts), reverse=True)
         except OSError:
             # Enumerating a root that vanished or became unreadable is the same kind of
             # best-effort failure as the per-directory ``rmdir`` below: this cleanup runs

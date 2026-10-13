@@ -375,3 +375,26 @@ def version_satisfies(current: str, required: str) -> bool:
         return specifier.contains(current_ver, prereleases=True)
     except (pkg_version.InvalidVersion, InvalidSpecifier):
         return False
+
+def is_link_like(path) -> bool:
+    """True for symbolic links *and* Windows directory junctions (reparse points).
+
+    ``Path.is_symlink()`` is false for a junction, yet a recursive traversal descends
+    into one, and a Windows directory symlink/junction is a permanent type -- so both
+    must be recognised before following or replacing a directory.  ``Path.is_junction``
+    only exists from Python 3.12, hence the ``st_file_attributes`` check.
+    """
+    from pathlib import Path
+    import os
+    import stat as _stat
+
+    candidate = Path(path)
+    if candidate.is_symlink():
+        return True
+    if os.name != "nt":
+        return False
+    try:
+        attributes = candidate.lstat().st_file_attributes
+    except (OSError, AttributeError):
+        return False
+    return bool(attributes & _stat.FILE_ATTRIBUTE_REPARSE_POINT)

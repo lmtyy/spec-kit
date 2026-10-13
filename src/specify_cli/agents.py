@@ -20,7 +20,7 @@ from ._init_options import is_ai_skills_enabled, load_init_options
 from ._invocation_style import get_invocation_prefix
 from ._toml_string import escape_toml_basic as _escape_toml_basic
 from ._toml_string import has_illegal_toml_control as _has_illegal_toml_control
-from ._utils import relative_extension_path_violation
+from ._utils import is_link_like, relative_extension_path_violation
 from .integrations._registration import project_registration
 from .ownership import (
     artifact_file_belongs_to,
@@ -1243,17 +1243,18 @@ class CommandRegistrar:
                 f"Invalid Copilot prompt name {cmd_name!r}: {name_reason}"
             )
         prompts_dir = project_root / ".github" / "prompts"
-        # A symlinked prompts directory (or prompt file) makes the write follow the link:
-        # our bytes -- and, after a failed install, the rollback that removes them -- would
-        # land on whatever the link points at, outside the project.  Refuse instead; the
-        # caller records the prompt as skipped.  This holds inside a transaction too, where
-        # the snapshot captured only the link and could not restore the target.
-        if prompts_dir.is_symlink():
+        # Any link or junction from the project root down to the prompt makes the write
+        # follow it: our bytes -- and, after a failed install, the rollback that removes
+        # them -- would land on whatever it points at, outside the project.  Check every
+        # path segment, not just the leaf: a linked `.github` would otherwise escape.
+        # Refuse instead; the caller records the prompt as skipped.  This holds inside a
+        # transaction too, where the snapshot captured only the link.
+        if is_link_like(project_root / ".github") or is_link_like(prompts_dir):
             return False
         prompts_dir.mkdir(parents=True, exist_ok=True)
         prompt_file = prompts_dir / f"{cmd_name}.prompt.md"
         CommandRegistrar._ensure_inside(prompt_file, prompts_dir)
-        if prompt_file.is_symlink():
+        if is_link_like(prompt_file):
             return False
         prompt_file.parent.mkdir(parents=True, exist_ok=True)
         from .integrations._file_changes import after_file_change, before_file_change
