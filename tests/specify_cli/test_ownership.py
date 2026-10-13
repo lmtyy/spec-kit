@@ -178,7 +178,7 @@ def test_reserved_schemes_are_not_claimable_as_owner_ids(value, owner_id):
     assert not artifact_belongs_to(text, kind="extension", owner_id=owner_id)
     assert not artifact_belongs_to(text, kind="preset", owner_id=owner_id)
 
-def test_operation_generated_output_is_takeable():
+def test_operation_generated_output_is_takeable(tmp_path):
     """Our own machinery may take over a layer file it generated itself.
 
     The integration writer records what it wrote, so registration can refresh that
@@ -187,8 +187,13 @@ def test_operation_generated_output_is_takeable():
     """
     from specify_cli.ownership import generated_this_operation, note_generated_write
 
-    written = Path("/tmp/generated-command.md")
+    written = tmp_path / "generated-command.md"
     assert not generated_this_operation(written)
+    written.write_text("LAYER BODY\n", encoding="utf-8")
     note_generated_write(written)
     assert generated_this_operation(written)
-    assert not generated_this_operation(Path("/tmp/somebody-elses.md"))
+
+    # Editing the file ends its provenance: it no longer holds the bytes we generated.
+    written.write_text("MY OWN EDIT\n", encoding="utf-8")
+    assert not generated_this_operation(written)
+    assert not generated_this_operation(tmp_path / "somebody-elses.md")

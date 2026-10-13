@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import hashlib
 import re
 from pathlib import Path
 from typing import Sequence
@@ -72,32 +73,54 @@ def transactional_writes_active() -> bool:
 #: Paths this process's own writers generated.  A layer file (an integration
 #: scaffold, for instance) carries no ownership marker, yet registration must be
 #: able to take it over; the writer that created it says so here instead.
-_GENERATED_THIS_OPERATION: contextvars.ContextVar[set | None] = contextvars.ContextVar(
+_GENERATED_THIS_OPERATION: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
     "specify_generated_this_operation", default=None
 )
 
 
-def note_generated_write(path) -> None:
-    """Record that our own machinery generated *path* during this process."""
+def note_generated_write(path, content: str | None = None) -> None:
+    """Record that our own machinery generated *path* during this process.
+
+    The bytes are recorded too: a pathname alone would let a later operation in a
+    long-lived process claim a file whose content the user has since replaced.
+    """
     current = _GENERATED_THIS_OPERATION.get()
     if current is None:
-        current = set()
+        current = {}
         _GENERATED_THIS_OPERATION.set(current)
+    key = str(Path(path))
+    if content is None:
+        try:
+            content = Path(path).read_text(encoding="utf-8", errors="replace")
+        except (OSError, TypeError, ValueError):
+            return
     try:
-        current.add(str(Path(path)))
+        current[key] = hashlib.sha256(content.encode("utf-8")).hexdigest()
     except (TypeError, ValueError):
         pass
 
 
 def generated_this_operation(path) -> bool:
-    """True when our own machinery generated *path* earlier in this process."""
+    """True when *path* still holds the bytes this process generated.
+
+    The recorded digest must match what is on disk now, so editing a generated file
+    ends its provenance.
+    """
     current = _GENERATED_THIS_OPERATION.get()
     if not current:
         return False
     try:
-        return str(Path(path)) in current
+        key = str(Path(path))
     except (TypeError, ValueError):
         return False
+    digest = current.get(key)
+    if digest is None:
+        return False
+    try:
+        actual = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except OSError:
+        return False
+    return digest == actual
 
 
 __all__ = [
@@ -128,21 +151,52 @@ def is_managed_output(text: str, style: str = "markdown") -> bool:
     if style == "yaml":
         emitted |= _footer_comment_lines(text)
     for line in emitted:
+        if not _is_complete_comment(line):
+            continue
         for marker in _MANAGED_COMMENT_MARKERS:
             if line.startswith(marker):
                 return True
     for value in _frontmatter_values("\n".join(frontmatter)):
-        # Any ``source`` in this project's vocabulary is an ownership claim: a reserved
-        # scheme (``extension:``/``preset:``/``override:``) or the bare ``<id>:<file>``
-        # composite the native-skill writers emit.  A value with no separator is prose.
-        scheme, separator, rest = value.partition(":")
-        if separator and scheme and rest:
-            return True
-        # The core/template layer stamps its renders with a repo-relative path
-        # (``templates/commands/<name>.md``) rather than a scheme: still a claim.
-        if not separator and value.endswith(".md") and "/" in value:
+        if _is_ownership_value(value):
             return True
     return False
+
+
+#: An identifier a writer can emit: no separators, no whitespace, no path syntax.
+_OWNER_ID = r"[A-Za-z0-9][\w.\-]*"
+#: ``<scheme>:<id>`` or ``<scheme>:<id>:<file>`` from the reserved vocabulary.
+_RESERVED_VALUE = re.compile(
+    r"^(?:" + "|".join(_SCHEMES) + r"):" + _OWNER_ID + r"(?::[\w./\-]+)?$"
+)
+#: ``<id>:<relative artifact path>`` -- the composite the native-skill writers emit.
+_COMPOSITE_VALUE = re.compile(
+    _OWNER_ID + r":[\w][\w./\-]*\.(?:md|markdown|toml|ya?ml)$"
+)
+#: The core layer's own stamp: a repo-relative render path and nothing else.
+_CORE_VALUE = re.compile(r"^[\w][\w./\-]*/[\w.\-]+\.(?:md|markdown|toml|ya?ml)$")
+
+
+def _is_ownership_value(value: str) -> bool:
+    """True only for marker values this project's writers actually emit.
+
+    A URL, an absolute or Windows path, a ``..`` traversal, or other prose that merely
+    contains a colon is not an ownership claim; accepting one would let a user's own
+    file be mistaken for generated output.
+    """
+    if not value or "://" in value or ".." in value.split("/"):
+        return False
+    if value.startswith(("/", "\\")) or re.match(r"^[A-Za-z]:[\\/]", value):
+        return False
+    if _RESERVED_VALUE.match(value):
+        return True
+    if value.partition(":")[0] in _SCHEMES:
+        return False
+    if _COMPOSITE_VALUE.match(value):
+        return True
+    if _CORE_VALUE.match(value):
+        return True
+    # A bare identifier is the legacy marker form the writers still stamp.
+    return bool(re.fullmatch(_OWNER_ID, value))
 
 
 OWNER_KINDS = ("extension", "preset")
@@ -155,6 +209,10 @@ _BLOCK_SCALAR = ('"""', "'''")
 # A YAML/TOML header assignment that opens a block scalar (``prompt: |2``): everything
 # after it is content, so a marker-shaped line inside it is prose, not provenance.
 _OPENS_BODY = re.compile(r"^[A-Za-z_][\w.\-]*\s*[:=]\s*[|>]")
+# A key whose value opens a triple-quoted string (``prompt = """User instructions``).
+_OPENS_TRIPLE_QUOTED = re.compile(
+    r"^[A-Za-z_][\w.\-]*\s*[:=]\s*(?:" + '"""' + "|" + "'''" + r")"
+)
 _KEY_VALUE = re.compile(r"^[A-Za-z_][\w.\-]*\s*[:=]")
 
 
@@ -204,6 +262,9 @@ def _split_header(text: str, style: str) -> tuple[list[str], list[str]]:
             continue
         if stripped.startswith(_BLOCK_SCALAR) or stripped.endswith(_BLOCK_SCALAR):
             break
+        if _OPENS_TRIPLE_QUOTED.match(stripped):
+            # ``prompt = """User instructions``: the rest of the file is that value.
+            break
         if _OPENS_BODY.match(stripped):
             break
         if not stripped or stripped.startswith(_COMMENT_PREFIXES) or _KEY_VALUE.match(stripped):
@@ -228,6 +289,9 @@ def _footer_comment_lines(text: str) -> set[str]:
                 break
             continue
         if not stripped.startswith(_COMMENT_PREFIXES):
+            break
+        if line[:1].isspace():
+            # Inside a block scalar: an indented ``# Source:`` line is the prompt's text.
             break
         footer.append(line)
     return {line.strip() for line in footer}
@@ -256,6 +320,17 @@ def _frontmatter_values(header: str) -> set[str]:
             if isinstance(source, str):
                 values.add(source.strip())
     return values
+
+
+def _is_complete_comment(line: str) -> bool:
+    """True when *line* is a whole comment, not prose that merely opens like one.
+
+    ``<!-- Source: discussion about markers`` with no closing delimiter is text a user
+    wrote, not a marker a writer emitted.
+    """
+    if line.startswith("<!--"):
+        return line.rstrip().endswith("-->")
+    return True
 
 
 def _comment_lines(lines: Sequence[str]) -> set[str]:

@@ -656,9 +656,10 @@ class IntegrationBase(ABC):
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(normalized.encode("utf-8"))
         after_file_change(dest)
-        # Generated layer output: registration may take this file over even though.
-        # it carries no ownership marker of its own.
-        note_generated_write(dest)
+        # Generated layer output: registration may take this file over even though it
+        # carries no ownership marker of its own.  Record the bytes that were written,
+        # so an edit to the file ends that provenance.
+        note_generated_write(dest, normalized)
         rel = dest.resolve().relative_to(project_root.resolve())
         manifest.record_existing(rel)
         return dest
