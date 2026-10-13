@@ -1243,9 +1243,18 @@ class CommandRegistrar:
                 f"Invalid Copilot prompt name {cmd_name!r}: {name_reason}"
             )
         prompts_dir = project_root / ".github" / "prompts"
+        # A symlinked prompts directory (or prompt file) makes the write follow the link:
+        # our bytes -- and, after a failed install, the rollback that removes them -- would
+        # land on whatever the link points at, outside the project.  Refuse instead; the
+        # caller records the prompt as skipped.  This holds inside a transaction too, where
+        # the snapshot captured only the link and could not restore the target.
+        if prompts_dir.is_symlink():
+            return False
         prompts_dir.mkdir(parents=True, exist_ok=True)
         prompt_file = prompts_dir / f"{cmd_name}.prompt.md"
         CommandRegistrar._ensure_inside(prompt_file, prompts_dir)
+        if prompt_file.is_symlink():
+            return False
         prompt_file.parent.mkdir(parents=True, exist_ok=True)
         from .integrations._file_changes import after_file_change, before_file_change
 
