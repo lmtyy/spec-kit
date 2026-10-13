@@ -1142,6 +1142,21 @@ class TestPresetSkills(PresetArtifactTestHelpers):
         PresetManager(project_dir).register_enabled_presets_for_agent("copilot")
         assert "DEMO BODY" in skill_file.read_text(encoding="utf-8")
 
+
+    def test_deletion_keeps_a_skill_the_user_replaced(self, project_dir):
+        """Reconciliation must not delete a skill file that is not verifiably ours.
+
+        Regression: the no-source branch unlinked the file, and with ``pack_id=None`` the
+        ownership check above it is skipped, so a user's replacement was removed.
+        """
+        manager = PresetManager(project_dir)
+        skills_dir = project_dir / ".github" / "skills"
+        assert manager._skill_delete_is_proven  # the guard exists
+        skill = self._create_skill(skills_dir, "speckit-specify", body="MY OWN SKILL")
+        assert manager._skill_delete_is_proven(skill / "SKILL.md") is True  # marked: ours
+        (skill / "SKILL.md").write_text("MY OWN SKILL\n", encoding="utf-8")
+        assert manager._skill_delete_is_proven(skill / "SKILL.md") is False  # unmarked: kept
+
     def test_kimi_legacy_dotted_skill_reconciles_priority_winner(
         self, project_dir, temp_dir
     ):

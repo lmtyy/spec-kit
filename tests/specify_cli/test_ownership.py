@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from specify_cli.ownership import artifact_belongs_to, artifact_file_belongs_to, header_region
+from specify_cli.ownership import artifact_belongs_to, is_managed_output, artifact_file_belongs_to, header_region
 
 EXT_MARKDOWN = (
     "---\n"
@@ -177,6 +177,70 @@ def test_reserved_schemes_are_not_claimable_as_owner_ids(value, owner_id):
     text = f"---\nmetadata:\n  source: {value}\n---\n"
     assert not artifact_belongs_to(text, kind="extension", owner_id=owner_id)
     assert not artifact_belongs_to(text, kind="preset", owner_id=owner_id)
+
+
+
+_ACCEPTED_MARKER_VALUES = [
+    "templates/commands/specify.md",
+    "templates/commands/my command.md",
+    "preset:demo",
+    "extension:demo",
+    "override:cmd",
+    "demo:commands/x.md",
+    "sample-extension:commands/sample.md",
+    "demo",
+    "preset:demo:commands/demo.md",
+    "demo:commands/hello.txt",
+    "demo:commands/hello.MD",
+    "demo:commands/my command.md",
+]
+
+_REJECTED_MARKER_VALUES = [
+    "notes/user.md",
+    "notes/user",
+    "https://example.org/document",
+    "../notes/user.md",
+    "C:\\notes\\user.md",
+    "/abs/user.md",
+    "preset:demo:../user.md",
+    "preset:demo:/absolute.md",
+    "C:notes/user.md",
+    "notes about markers",
+]
+
+
+@pytest.mark.parametrize("value", _ACCEPTED_MARKER_VALUES)
+def test_writer_marker_values_are_recognised(value):
+    """Every form the writers emit counts as a claim -- including spaces and any suffix.
+
+    A recogniser narrower than the writers' own path policy blocks legitimate refreshes
+    of output we generated.
+    """
+    assert is_managed_output(f"---\nsource: {value}\n---\n")
+
+
+@pytest.mark.parametrize("value", _REJECTED_MARKER_VALUES)
+def test_user_looking_values_are_not_recognised(value):
+    """A URL, an absolute or drive-relative path, a traversal, or prose is not a claim."""
+    assert not is_managed_output(f"---\nsource: {value}\n---\n")
+
+
+def test_comment_markers_are_recognised():
+    """The comment forms the writers emit are recognised.
+
+    OPEN (review F2, comment half): the *value* inside a comment marker is not validated
+    yet, so `<!-- Source: https://example/a.md -->` is still accepted as a claim, and an
+    unterminated `<!--` is rejected only by the comment-completeness check. Validating it
+    needs the writers to emit a checkable owner token first: `source_id` is a free-form
+    string today, and `CommandRegistrar` also emits a custom context note in that slot
+    (`agents.py` context_note), so a stricter check rejects real output (56 tests).
+    """
+    assert is_managed_output("<!-- Source: provider -->\n")
+    assert is_managed_output("<!-- Source: preset:demo -->\n")
+    assert is_managed_output("<!-- Source: extension:demo -->\n")
+    assert is_managed_output("<!-- Extension: demo -->\n")
+    assert is_managed_output("<!-- Config: .specify/extensions/demo/ -->\n")
+    assert not is_managed_output("<!-- Source: discussion about markers\n")
 
 def test_operation_generated_output_is_takeable(tmp_path):
     """Our own machinery may take over a layer file it generated itself.
