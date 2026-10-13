@@ -496,7 +496,15 @@ class TestIntegrationUpgradeDetailed:
 
         canonical, legacy = _move_kilocode_install_to_legacy_layout(project)
         legacy_git_command = legacy / "speckit.git.feature.md"
-        legacy_git_command.write_text("# legacy Kilo git command\n", encoding="utf-8")
+        # Real generated output carries its owner's marker; only marker-verified
+        # files are an extension's to clean up.
+        legacy_git_command.write_text(
+            "---\ndescription: git feature\n---\n"
+            "<!-- Extension: git -->\n"
+            "<!-- Config: .specify/extensions/git/ -->\n"
+            "# legacy Kilo git command\n",
+            encoding="utf-8",
+        )
         registry = json.loads(registry_path.read_text(encoding="utf-8"))
         registry["extensions"]["git"].setdefault("registered_commands", {})[
             "kilocode"

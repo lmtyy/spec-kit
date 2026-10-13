@@ -2,7 +2,6 @@
 
 import copy
 import os
-import shutil
 import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Union
@@ -1464,9 +1463,15 @@ class _PresetSkillMethods:
             if source in owned_sources:
                 from ..integrations._file_changes import after_file_change, before_file_change
 
-                before_file_change(skill_subdir, removal=True)
-                shutil.rmtree(skill_subdir)
-                after_file_change(skill_subdir)
+                # Only the marker-verified SKILL.md is ours: a file the user keeps
+                # beside it stays, and the directory goes once it is empty.
+                before_file_change(skill_file, removal=True)
+                skill_file.unlink(missing_ok=True)
+                after_file_change(skill_file)
+                try:
+                    skill_subdir.rmdir()
+                except OSError:
+                    pass
 
     @staticmethod
     def _warn_unrestored_skill(
@@ -1736,12 +1741,17 @@ class _PresetSkillMethods:
                 _write_shared_text(skills_dir, skill_file, skill_content)
                 mutated_names.append(skill_name)
             else:
-                # No core or extension template — remove the skill entirely
+                # No core or extension template — remove the skill's own file and
+                # leave anything the user added beside it in place.
                 from ..integrations._file_changes import after_file_change, before_file_change
 
-                before_file_change(skill_subdir, removal=True)
-                shutil.rmtree(skill_subdir)
-                after_file_change(skill_subdir)
+                before_file_change(skill_file, removal=True)
+                skill_file.unlink(missing_ok=True)
+                after_file_change(skill_file)
+                try:
+                    skill_subdir.rmdir()
+                except OSError:
+                    pass
                 mutated_names.append(skill_name)
 
         return mutated_names

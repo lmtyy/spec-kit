@@ -456,7 +456,7 @@ def test_cleanup_failure_preserves_tracking_for_retry(tmp_path, monkeypatch):
     output = root / ".gemini/commands" / f"{COMMAND}.toml"
     original = manager._unregister_commands
 
-    def fail(_):
+    def fail(_, **kwargs):
         raise OSError("cleanup failed")
 
     monkeypatch.setattr(manager, "_unregister_commands", fail)
@@ -687,3 +687,130 @@ def test_selector_expands_namespace_fallback_conventional_command(
     text = output.read_text(encoding="utf-8")
     assert "SELECTOR BODY" in text
     assert "TARGET BODY" in text
+
+
+def _preset_outputs(root, needle):
+    return sorted(
+        path
+        for path in root.rglob("*")
+        if path.is_file()
+        and not path.is_symlink()
+        and needle in path.read_text(encoding="utf-8", errors="replace")
+    )
+
+
+def test_preset_cleanup_preserves_user_content_and_owner_separation(tmp_path, monkeypatch):
+    """Preset cleanup honours ownership, exactly and per owner kind.
+
+    The disable pass re-materializes a preset's own output before cleanup, so
+    preservation is pinned where the ownership decision is actually taken: the
+    registrar call every preset cleanup path now goes through.
+    """
+    from specify_cli.agents import CommandRegistrar
+
+    root = project(tmp_path, monkeypatch, "copilot", False)
+    manager = PresetManager(root)
+    manager.install_from_directory(
+        preset(tmp_path, "provider", COMMAND, "PROVIDER BODY", True), "0.1.5"
+    )
+    manager.register_enabled_presets_for_agent("copilot")
+    outputs = _preset_outputs(root, "PROVIDER BODY")
+    assert outputs, "the preset did not materialize an output"
+    owned = outputs[0]
+    assert "<!-- Source: provider -->" in owned.read_text(encoding="utf-8")
+
+    registrar = CommandRegistrar(root)
+    agent = "copilot"
+
+    # (1) the user takes the file over: cleanup must leave it alone
+    owned.write_text("my own command\n", encoding="utf-8")
+    preserved = registrar.unregister_commands(
+        {agent: [COMMAND]},
+        root,
+        source_id="provider",
+        owner_kind="preset",
+        own_directories=(manager.presets_dir / "provider",),
+    )
+    assert preserved == [owned]
+    assert owned.read_text(encoding="utf-8") == "my own command\n"
+
+    # (2) registration must not overwrite the user's file either
+    manager.register_enabled_presets_for_agent("copilot")
+    assert owned.read_text(encoding="utf-8") == "my own command\n"
+
+    # (3) a different owner id is not claimed: the file now belongs to another preset
+    owned.write_text(
+        "---\ndescription: other\n---\n<!-- Source: other-preset -->\nBODY\n",
+        encoding="utf-8",
+    )
+    preserved = registrar.unregister_commands(
+        {agent: [COMMAND]},
+        root,
+        source_id="provider",
+        owner_kind="preset",
+        own_directories=(manager.presets_dir / "provider",),
+    )
+    assert preserved == [owned]
+    assert "other-preset" in owned.read_text(encoding="utf-8")
+
+    manager.register_enabled_presets_for_agent("copilot")
+
+    # (4) the real owner still removes its own untouched output
+    owned.write_text(
+        "---\ndescription: Lifecycle test\n---\n\n\n<!-- Source: provider -->\nPROVIDER BODY\n",
+        encoding="utf-8",
+    )
+    preserved = registrar.unregister_commands(
+        {agent: [COMMAND]},
+        root,
+        source_id="provider",
+        owner_kind="preset",
+        own_directories=(manager.presets_dir / "provider",),
+    )
+    assert preserved == []
+    assert not owned.exists()
+
+
+def test_preset_skill_cleanup_keeps_auxiliary_files(tmp_path, monkeypatch):
+    """Only the owned SKILL.md is removed; a file the user added stays."""
+    root = project(tmp_path, monkeypatch, "copilot", True)
+    manager = PresetManager(root)
+    manager.install_from_directory(
+        preset(tmp_path, "provider", COMMAND, "PROVIDER BODY", True), "0.1.5"
+    )
+    manager.register_enabled_presets_for_agent("copilot")
+    skills = _preset_outputs(root, "PROVIDER BODY")
+    assert skills, "the preset did not materialize a skill"
+    skill_file = [path for path in skills if path.name == "SKILL.md"][0]
+    notes = skill_file.parent / "notes.txt"
+    notes.write_text("my own notes\n", encoding="utf-8")
+
+    result = CliRunner().invoke(app, ["preset", "disable", "provider"])
+
+    assert result.exit_code == 0, result.output
+    assert not skill_file.exists()
+    assert notes.read_text(encoding="utf-8") == "my own notes\n"
+
+
+def test_preset_removal_preserves_a_user_owned_command(tmp_path, monkeypatch):
+    """Removing a preset must not overwrite a command the user took over.
+
+    Removal is not a transaction: it may clean up its own outputs, but a file whose
+    content is not verifiable managed output is left exactly as the user left it.
+    """
+    root = project(tmp_path, monkeypatch, "copilot", False)
+    manager = PresetManager(root)
+    manager.install_from_directory(
+        preset(tmp_path, "provider", COMMAND, "PROVIDER BODY", True), "0.1.5"
+    )
+    manager.register_enabled_presets_for_agent("copilot")
+    outputs = _preset_outputs(root, "PROVIDER BODY")
+    assert outputs, "the preset did not materialize an output"
+    owned = outputs[0]
+    owned.write_text("MY OWN COMMAND\n", encoding="utf-8")
+
+    result = CliRunner().invoke(app, ["preset", "remove", "provider"])
+
+    assert result.exit_code == 0, result.output
+    assert owned.is_file()
+    assert owned.read_text(encoding="utf-8") == "MY OWN COMMAND\n"

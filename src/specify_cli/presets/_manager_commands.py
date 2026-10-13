@@ -259,7 +259,7 @@ class _PresetCommandMethods:
             }
             retired = {agent: recorded for agent, recorded in retired.items() if recorded}
             if retired:
-                self._unregister_commands(retired)
+                self._unregister_commands(retired, pack_id=pack_id)
             raw_skills = metadata.get("registered_skills", {})
             skills = (
                 self._infer_legacy_skill_provenance(raw_skills, pack_id, fallback_agent="")
@@ -1047,7 +1047,7 @@ class _PresetCommandMethods:
                 for command_name in stale_command_names
                 if command_name not in fully_replaced
             ]
-            self._unregister_commands({agent_name: fully_replaced})
+            self._unregister_commands({agent_name: fully_replaced}, pack_id=pack_id)
             if remaining_stale:
                 merged_commands[agent_name] = remaining_stale
             else:
@@ -1220,7 +1220,9 @@ class _PresetCommandMethods:
                         name for name in agent_command_names if name not in shared_names
                     ]
                 if command_names_to_unregister:
-                    self._unregister_commands({agent_name: command_names_to_unregister})
+                    self._unregister_commands(
+                        {agent_name: command_names_to_unregister}, pack_id=pack_id
+                    )
                 new_registered_commands = copy.deepcopy(registered_commands)
                 new_registered_commands.pop(agent_name, None)
                 updates["registered_commands"] = new_registered_commands
@@ -1241,17 +1243,33 @@ class _PresetCommandMethods:
             if updates:
                 self.registry.update(pack_id, updates)
 
-    def _unregister_commands(self, registered_commands: Dict[str, List[str]]) -> None:
+    def _unregister_commands(
+        self, registered_commands: Dict[str, List[str]], *, pack_id: str | None = None
+    ) -> None:
         """Remove previously registered command files from agent directories.
+
+        With ``pack_id`` the owning preset is passed through so a file the user
+        has taken over -- or one another owner now holds -- is preserved and
+        reported instead of being deleted.
 
         Args:
             registered_commands: Dict mapping agent names to command name lists
+            pack_id: Preset that must still be verifiable for removal
         """
         try:
             registrar = self._command_registrar()
         except ImportError:
             return
-        registrar.unregister_commands(registered_commands, self.project_root)
+        if pack_id is None:
+            registrar.unregister_commands(registered_commands, self.project_root)
+            return
+        registrar.unregister_commands(
+            registered_commands,
+            self.project_root,
+            source_id=pack_id,
+            owner_kind="preset",
+            own_directories=(self.presets_dir / pack_id,),
+        )
 
     def _merge_pack_registered_commands(
         self, pack_id: str, written: Optional[Dict[str, List[str]]]
@@ -1570,6 +1588,32 @@ class _PresetCommandMethods:
                     # command would touch every non-skill agent's directory,
                     # deleting historical artifacts from integrations that
                     # were never active when this preset registered (#2948).
+                    # The composed file was written by the top layer, so that
+                    # preset owns it: a file the user has since rewritten (or
+                    # another owner now holds) is preserved instead of deleted.
+                    # Ownership comes from the preset that actually supplies this
+                    # command (the same rule composition uses below), not from the
+                    # global priority order: an unrelated high-priority preset must
+                    # not be named as the owner of another preset's output.
+                    owner_pack_id = None
+                    for _pid, _meta in presets_by_priority:
+                        _m = resolver._get_manifest(self.presets_dir / _pid)
+                        if _m is None:
+                            continue
+                        if any(
+                            _t.get("type") == "command"
+                            and isinstance(_t.get("name"), str)
+                            and (
+                                _t["name"] == cmd_name
+                                or (
+                                    is_regex_selector(_t["name"])
+                                    and selector_matches(_t["name"], cmd_name)
+                                )
+                            )
+                            for _t in _m.templates
+                        ):
+                            owner_pack_id = _pid
+                            break
                     registrar.unregister_commands(
                         {
                             agent: cmd_names_to_unregister
@@ -1583,6 +1627,11 @@ class _PresetCommandMethods:
                             )
                         },
                         self.project_root,
+                        source_id=owner_pack_id,
+                        owner_kind="preset",
+                        own_directories=(
+                            (self.presets_dir / owner_pack_id,) if owner_pack_id else ()
+                        ),
                     )
                     continue
 

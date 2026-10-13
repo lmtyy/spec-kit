@@ -153,6 +153,78 @@ def _snapshot_command_candidates(manager, manifest) -> set[str]:
     return names
 
 
+def _extension_skill_owner_agents(manager, preset_manager, extension_id, metadata) -> set[str]:
+    """Agents whose skills root actually holds a skill this extension owns.
+
+    ``registered_skills`` is deliberately agent-agnostic, so a skills-only
+    integration (one that registers no commands) never appears in
+    ``registered_commands``. After the project switches to another agent, the
+    original agent is therefore missing from the cleanup targets and its global
+    ``SKILL.md`` files stay active even though the extension reports as disabled.
+
+    Recover the owning agents from the skills themselves: probe every supported
+    agent's skills root for the recorded names and accept only those whose
+    ``SKILL.md`` frontmatter records *this* extension as the owner
+    (``metadata.source == "extension:<id>"``, the marker extension registration
+    writes). No other owner's skill is ever claimed, and nothing is attributed by
+    name similarity alone.
+    """
+    from ..agents import CommandRegistrar
+
+    if not isinstance(metadata, dict):
+        return set()
+    raw = metadata.get("registered_skills", [])
+    if not isinstance(raw, list):
+        # A per-agent mapping already carries its own provenance.
+        return set()
+    names = [name for name in raw if preset_manager._is_safe_registry_skill_name(name)]
+    if not names:
+        return set()
+
+    marker = f"extension:{extension_id}"
+    registrar = CommandRegistrar(manager.project_root)
+    project_root = Path(os.path.abspath(manager.project_root))
+    owners: set[str] = set()
+    seen_dirs: set = set()
+    for agent_name in sorted(registrar.AGENT_CONFIGS):
+        if not agent_name or agent_name == "generic":
+            continue
+        skills_dir = preset_manager._safe_skills_dir_for_agent(agent_name)
+        if skills_dir is None:
+            continue
+        # Only project-local roots are eligible. A marker proves which extension
+        # wrote a skill, not which project owns it, so an unrecorded global root
+        # (a shared home directory) keeps its files: supporting it would need
+        # provenance that records the owning project and destination.
+        if not Path(os.path.abspath(skills_dir)).is_relative_to(project_root):
+            continue
+        # Several agent names can resolve to one physical root (e.g. .agents/skills);
+        # claim it once, under a deterministic name.
+        key = Path(os.path.abspath(skills_dir))
+        if key in seen_dirs:
+            continue
+        seen_dirs.add(key)
+        for name in names:
+            skill_dir = skills_dir / name
+            if not preset_manager._validate_skill_subdir(
+                skill_dir, create=False, skills_root=skills_dir
+            ):
+                continue
+            skill_file = skill_dir / "SKILL.md"
+            if not skill_file.is_file():
+                continue
+            try:
+                content = skill_file.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            frontmatter, _ = registrar.parse_frontmatter(content)
+            skill_metadata = frontmatter.get("metadata")
+            if isinstance(skill_metadata, dict) and skill_metadata.get("source") == marker:
+                owners.add(agent_name)
+                break
+    return owners
+
+
 def _refresh_presets_and_warn(
     project_root: Path,
     affected_commands: set[str] | None = None,

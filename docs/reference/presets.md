@@ -347,7 +347,6 @@ Zero-match and invalid patterns are handled as follows:
 - `specify preset info` lists each selector's current concrete matches nested beneath the declaration, or `No current matches` when there are none.
 - `specify preset resolve <name>` attributes the layers it traces back to the declaration that matched, for example `sel-pack v1.0.0 → …/spec-template.md (via regex:^spec-.*$)`, so a selector-driven resolution is visible in the stack trace and not only in `preset info`.
 
-
 #### Regex selector safety boundaries
 
 A `regex:` selector pattern is validated when a preset is installed, and again

@@ -69,9 +69,9 @@ class TestExtensionAddCLI:
         )
         original_unregister = __import__("specify_cli.agents", fromlist=["CommandRegistrar"]).CommandRegistrar.unregister_commands
 
-        def record_unregister(registrar, commands, root):
+        def record_unregister(registrar, commands, root, **kwargs):
             recorded.append(commands)
-            return original_unregister(registrar, commands, root)
+            return original_unregister(registrar, commands, root, **kwargs)
 
         monkeypatch.setattr(
             "specify_cli.agents.CommandRegistrar.unregister_commands", record_unregister

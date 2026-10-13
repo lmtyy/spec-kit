@@ -1,6 +1,5 @@
 """Real historical destination regressions for preset enable/disable."""
 
-import shutil
 from pathlib import Path
 
 import pytest
@@ -125,14 +124,14 @@ def test_historical_zero_layer_cleanup_failure_retains_retryable_tracking(
     before = manager.registry.get("provider")
     activate(root, "bob", False)
     if skills:
-        original = shutil.rmtree
+        original = Path.unlink
 
         def fail_target(path, *args, **kwargs):
-            if Path(path) == historical.parent:
+            if path == historical:
                 raise OSError("historical target blocked")
             return original(path, *args, **kwargs)
 
-        monkeypatch.setattr(shutil, "rmtree", fail_target)
+        monkeypatch.setattr(Path, "unlink", fail_target)
     else:
         original = Path.unlink
 
@@ -149,10 +148,7 @@ def test_historical_zero_layer_cleanup_failure_retains_retryable_tracking(
     assert retained["enabled"] is False
     key = "registered_skills" if skills else "registered_commands"
     assert retained[key][agent] == before[key][agent]
-    if skills:
-        monkeypatch.setattr(shutil, "rmtree", original)
-    else:
-        monkeypatch.setattr(Path, "unlink", original)
+    monkeypatch.setattr(Path, "unlink", original)
     invoke("disable", "provider")
     assert not historical.exists()
     metadata = PresetManager(root).registry.get("provider")

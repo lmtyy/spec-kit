@@ -1,7 +1,6 @@
 """Real filesystem regressions for retrying best-effort preset disable cleanup."""
 
 from pathlib import Path
-import shutil
 
 import pytest
 from typer.testing import CliRunner
@@ -89,16 +88,18 @@ def test_disable_retries_failed_filesystem_cleanup(
 
         monkeypatch.setattr(Path, "unlink", fail_once)
     else:
-        rmtree = shutil.rmtree
+        # A skill directory is cleaned by unlinking its owned SKILL.md, so that is
+        # where the blocked filesystem operation has to be injected.
+        unlink = Path.unlink
 
         def fail_once(path, *args, **kwargs):
-            if Path(path) == output.parent and not attempts:
-                attempts.append(Path(path))
+            if path == output and not attempts:
+                attempts.append(path)
                 assert PresetManager(root).registry.get("provider")["enabled"] is False
                 raise OSError("filesystem cleanup blocked")
-            return rmtree(path, *args, **kwargs)
+            return unlink(path, *args, **kwargs)
 
-        monkeypatch.setattr(shutil, "rmtree", fail_once)
+        monkeypatch.setattr(Path, "unlink", fail_once)
 
     runner = CliRunner()
     with pytest.warns(UserWarning, match="provenance was preserved for retry"):

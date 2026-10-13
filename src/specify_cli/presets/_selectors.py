@@ -3,9 +3,11 @@
 Regexes use a Thompson state machine, never Python's backtracking matcher for
 compound expressions. Each state is visited at most once per input position, so
 the work is bounded by (input length + 1) x (number of compiled edges) and no
-pattern can backtrack. Import-time limits are 4,096 pattern characters, 4,096
-states and 4,096 input characters; exceeding one raises a clear ``re.error`` and
-exact-name equality is unchanged.
+pattern can backtrack. Compilation and matching limits are 4,096 pattern
+characters, 4,096 states, 2,048 compiled edges and 1,024 input
+characters; a pattern past a compilation limit
+is rejected with ``SelectorSafetyError`` (a ``re.error`` subclass) that names it,
+and exact-name equality is unchanged.
 
 Groups, alternation, character classes, ordinary/lazy quantifiers, flags and
 anchors retain Python full-match semantics. Rejected during validation AND runtime
@@ -34,8 +36,10 @@ _MAX_PATTERN = 4096
 _MAX_STATES = 4096
 # Concrete resource names are logical names: manifest-declared names and
 # filesystem stems, which are capped at 255 bytes by every filesystem we run on.
-# 4096 leaves an order of magnitude of headroom while keeping a hostile
-# many-state pattern from being run over a megabyte-long pseudo-name.
+# 1024 leaves roughly four times the 255-byte
+# filesystem limit while keeping a hostile many-state pattern from being run
+# over an unbounded pseudo-name. Matching rejects longer input with the same
+# ``SelectorSafetyError``; exact-name equality is never length-capped.
 _MAX_INPUT = 1024
 # Edges must be capped independently of states: a branch reuses its entry state for
 # every alternative and a repetition unrolls those edges, so a branch of N empty

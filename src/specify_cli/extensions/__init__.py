@@ -32,6 +32,7 @@ from packaging import version as pkg_version
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 
 from .._assets import _locate_core_pack, _repo_root
+from ..ownership import artifact_file_belongs_to, transactional_artifact_writes
 from .._download_security import (
     archive_format_from_name,
     archive_suffix,
@@ -879,6 +880,7 @@ class ExtensionRegistry:
         }
         self._save()
 
+    @transactional_artifact_writes
     def update(self, extension_id: str, metadata: dict):
         """Update extension metadata in registry, merging with existing entry.
 
@@ -1057,6 +1059,13 @@ class ExtensionRegistry:
         )
 
 
+def _resolve_for_ownership(path: Path) -> str:
+    """Path form used to compare recorded ownership across /private and /var."""
+    try:
+        return str(path.resolve())
+    except OSError:
+        return str(path)
+
 class ExtensionManager:
     """Manages extension lifecycle: installation, removal, updates."""
 
@@ -1069,6 +1078,9 @@ class ExtensionManager:
         self.project_root = project_root
         self.extensions_dir = project_root / ".specify" / "extensions"
         self.registry = ExtensionRegistry(self.extensions_dir)
+        # Files left in place because they are no longer verifiably this
+        # extension's; the caller reports them instead of deleting user work.
+        self.preserved_paths: List[Path] = []
 
     def _rescue_staging_dir(self, extension_id: str) -> Path:
         """Fixed-length staging directory path for a preserved-config rescue.
@@ -1614,16 +1626,13 @@ class ExtensionManager:
                     remaining.append(command)
                 continue
             if layers[0]["source"] == "project override":
-                if not is_declared:
-                    # A convention-only candidate has no manifest entry to carry
-                    # a staged payload for, and the project override still wins
-                    # at resolution time, so there is nothing to publish here.
-                    continue
-                # Project overrides outrank presets as well as the newly
-                # eligible provider. Stage the resolved payload inside the
-                # provider so its normal registrars retain their active-agent,
-                # ownership and incremental rollback behavior without first
-                # publishing the raw extension command.
+                # A project override outranks presets and the newly eligible
+                # provider, so the override's own content is what has to reach the
+                # agent -- for a convention-only candidate just as for a declared
+                # one. Nothing here may depend on a later lifecycle refresh: the
+                # payload is staged inside the provider so its normal registrars
+                # retain their active-agent, ownership and incremental rollback
+                # behavior without first publishing the raw extension command.
                 content = resolver.resolve_content(name, "command")
                 if content is None:
                     raise ExtensionError(
@@ -1883,11 +1892,16 @@ class ExtensionManager:
                 if not is_expected_dev_symlink and not force:
                     continue
             elif skill_dir_preexists and not force:
-                # Never add files to a pre-existing user directory. Without a
-                # verifiable SKILL.md ownership marker, rollback/removal cannot
-                # distinguish our output from unrelated user artifacts.
-                # Skipped when force=True (upgrade path).
-                continue
+                # Never add files to a pre-existing user directory -- unless this
+                # extension recorded that directory when a previous cleanup could not
+                # remove it (the user keeps auxiliary files beside our entrypoint).
+                # Only that recorded provenance authorizes writing our own SKILL.md
+                # again; nothing else in the directory is touched.
+                recorded = (self.registry.get(manifest.id) or {}).get(
+                    "preserved_skill_dirs", []
+                )
+                if _resolve_for_ownership(skill_subdir) not in set(recorded):
+                    continue
 
             # Create skill directory; track whether we created it so we can clean
             # up safely if reading the source file subsequently fails.
@@ -2499,8 +2513,41 @@ class ExtensionManager:
                     except OSError:
                         pass
                     continue
-            with changing_file(skill_subdir, removal=True):
-                shutil.rmtree(skill_subdir)
+            # Only the marker-verified SKILL.md is this extension's; anything the
+            # user keeps beside it (notes, extra resources) stays, and the
+            # directory goes only once it is empty.
+            if artifact_file_belongs_to(
+                skill_file,
+                kind="extension",
+                owner_id=extension_id,
+                own_directories=(self.extensions_dir / extension_id,),
+            ):
+                with changing_file(skill_file, removal=True):
+                    unlink(skill_file)
+            try:
+                skill_subdir.rmdir()
+            except OSError:
+                # The user keeps files beside our entrypoint, so the directory stays.
+                # Record it: that provenance is what lets a later enable recreate the
+                # entrypoint without authorizing writes to anything else.
+                self.preserved_paths.append(skill_subdir)
+                # Record the resolved path so the authorization below compares the same
+                # form whichever way the directory was reached.  Bookkeeping only: the
+                # entry may already be gone (a removal in progress) and the registry
+                # refuses updates for unknown extensions, so a failure here must never
+                # replace the operation's own outcome.
+                try:
+                    entry = self.registry.get(extension_id)
+                    if isinstance(entry, dict):
+                        recorded = list(entry.get("preserved_skill_dirs", []))
+                        resolved_dir = _resolve_for_ownership(skill_subdir)
+                        if resolved_dir not in recorded:
+                            recorded.append(resolved_dir)
+                            self.registry.update(
+                                extension_id, {"preserved_skill_dirs": recorded}
+                            )
+                except Exception:  # noqa: BLE001 - bookkeeping is best effort
+                    pass
 
     def _extension_owned_skill_names(
         self, skill_names: List[str], extension_id: str
@@ -2912,6 +2959,8 @@ class ExtensionManager:
             )
             artifact_snapshot.close()
             shutil.rmtree(backup_root, ignore_errors=True)
+
+    @transactional_artifact_writes
 
     def _install_from_directory_unchecked(
         self,
@@ -4141,7 +4190,11 @@ class ExtensionManager:
                 safe_commands.pop("generic")
             if safe_commands:
                 CommandRegistrar(self.project_root, include_generic=False).unregister_commands(
-                    safe_commands, self.project_root
+                    safe_commands,
+                    self.project_root,
+                    source_id=extension_id,
+                    owner_kind="extension",
+                    own_directories=(extension_dir,),
                 )
         if metadata:
             self._remove_generic_artifact_paths(extension_id, metadata)
@@ -4327,7 +4380,7 @@ class ExtensionManager:
         enabled_only: bool = False,
         commands_only: bool = False,
         extension_ids: Optional[set[str]] = None,
-    ) -> None:
+    ) -> list:
         """Remove extension files registered for a specific agent.
 
         Extension command files are tracked per agent in ``registered_commands``.
@@ -4347,11 +4400,12 @@ class ExtensionManager:
         losing registry entries while leaving orphaned files on disk.
         """
         if not agent_name:
-            return
+            return []
 
         registrar = CommandRegistrar(self.project_root)
         if agent_name not in registrar.AGENT_CONFIGS:
-            return
+            return []
+        preserved: list = []
 
         # Resolve the skills directory for the specific agent so cleanup is
         # agent-scoped and does not depend on the currently-active agent in
@@ -4385,8 +4439,17 @@ class ExtensionManager:
                         metadata, command_names, skills=False, extension_id=ext_id
                     )
                 if command_names:
-                    registrar.unregister_commands(
-                        {agent_name: command_names}, self.project_root
+                    # Pass the owning extension so a command file the user has
+                    # rewritten (or another owner has taken over) is preserved
+                    # instead of being deleted from under them.
+                    preserved.extend(
+                        registrar.unregister_commands(
+                            {agent_name: command_names},
+                            self.project_root,
+                            source_id=ext_id,
+                            owner_kind="extension",
+                            own_directories=(self.extensions_dir / ext_id,),
+                        )
                     )
 
                 new_registered = copy.deepcopy(registered_commands)
@@ -4459,13 +4522,21 @@ class ExtensionManager:
             if updates:
                 self.registry.update(ext_id, updates)
 
+        return preserved
+
     @project_registration
     def _retire_legacy_flat_extension_commands(
         self,
         agent_name: str,
         command_names: List[str],
+        source_id: Optional[str] = None,
     ) -> List[Path]:
-        """Remove old flat commands whose replacement skills were written."""
+        """Remove old flat commands whose replacement skills were written.
+
+        With ``source_id`` the flat file is removed only while it is still that
+        extension's own output: a customized legacy command is preserved and
+        reported instead of being deleted.
+        """
         from ..agents import CommandRegistrar
         from ..integrations import get_integration
 
@@ -4506,6 +4577,7 @@ class ExtensionManager:
             return []
 
         removed: List[Path] = []
+        preserved_legacy: List[Path] = []
         for command_name in command_names:
             if (
                 not isinstance(command_name, str)
@@ -4522,10 +4594,21 @@ class ExtensionManager:
                 continue
 
             legacy_file = legacy_root / f"{command_name}{legacy_extension}"
-            if legacy_file.is_symlink() or legacy_file.is_file():
-                legacy_file.unlink()
-                removed.append(legacy_file)
+            if not (legacy_file.is_symlink() or legacy_file.is_file()):
+                continue
+            if source_id is not None and not artifact_file_belongs_to(
+                legacy_file,
+                kind="extension",
+                owner_id=source_id,
+                own_directories=(self.extensions_dir / source_id,),
+                style="toml" if legacy_file.suffix == ".toml" else "markdown",
+            ):
+                preserved_legacy.append(legacy_file)
+                continue
+            legacy_file.unlink()
+            removed.append(legacy_file)
 
+        self.preserved_paths.extend(preserved_legacy)
         return removed
 
     def register_enabled_extensions_for_agent(
@@ -4848,7 +4931,11 @@ class ExtensionManager:
                                         extension_id=ext_id,
                                     )
                                 registrar.unregister_commands(
-                                    {agent_name: fully_replaced}, self.project_root
+                                    {agent_name: fully_replaced},
+                                    self.project_root,
+                                    source_id=ext_id,
+                                    owner_kind="extension",
+                                    own_directories=(self.extensions_dir / ext_id,),
                                 )
                                 registered_commands = metadata.get(
                                     "registered_commands", {}
@@ -4873,6 +4960,7 @@ class ExtensionManager:
                     self._retire_legacy_flat_extension_commands(
                         agent_name,
                         registered,
+                        source_id=ext_id,
                     )
 
                 if agent_name == "generic":
@@ -5112,10 +5200,22 @@ class CommandRegistrar:
         )
 
     def unregister_commands(
-        self, registered_commands: Dict[str, List[str]], project_root: Path
-    ) -> None:
+        self,
+        registered_commands: Dict[str, List[str]],
+        project_root: Path,
+        *,
+        source_id: str | None = None,
+        owner_kind: str = "extension",
+        own_directories: tuple = (),
+    ) -> List[Path]:
         """Remove previously registered command files from agent directories."""
-        self._registrar.unregister_commands(registered_commands, project_root)
+        return self._registrar.unregister_commands(
+            registered_commands,
+            project_root,
+            source_id=source_id,
+            owner_kind=owner_kind,
+            own_directories=own_directories,
+        )
 
     def register_commands_for_claude(
         self,

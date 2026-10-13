@@ -14,6 +14,7 @@ from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from .._download_security import safe_extract_archive
 from .._init_options import is_ai_skills_enabled, resolve_active_agent_for_registration
 from .._utils import version_satisfies
+from ..ownership import transactional_artifact_writes
 from ..extensions import REINSTALL_COMMAND, normalize_priority
 from ..shared_infra import (
     _ensure_safe_shared_destination,
@@ -380,6 +381,7 @@ class PresetManager(_PresetCommandMethods, _PresetSkillMethods):
 
         return unmet
 
+    @transactional_artifact_writes
     def install_from_directory(
         self,
         source_dir: Path,
@@ -1144,7 +1146,7 @@ class PresetManager(_PresetCommandMethods, _PresetSkillMethods):
 
         # Unregister non-skill command files from AI agents.
         if registered_commands:
-            self._unregister_commands(registered_commands)
+            self._unregister_commands(registered_commands, pack_id=pack_id)
 
         if pack_dir.exists():
             shutil.rmtree(pack_dir)

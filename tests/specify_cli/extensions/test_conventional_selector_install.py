@@ -190,3 +190,101 @@ def test_conventional_install_resolves_priority_and_declared_overlap_once(
         assert "preset:selector" in target.read_text()
     else:
         assert metadata["registered_commands"]["gemini"] == [COMMAND]
+
+
+@pytest.mark.parametrize("skills", [False, True])
+def test_conventional_candidate_install_is_idempotent_on_reinstall(
+    tmp_path, monkeypatch, skills
+):
+    """Reinstalling a conventional-only provider must not duplicate its output."""
+    root = project(tmp_path, monkeypatch, "copilot" if skills else "gemini", skills)
+    PresetManager(root).install_from_directory(
+        preset(tmp_path, "selector", r"regex:speckit\.provider\..*", "SELECTOR BODY", strategy="append"),
+        "0.1.5",
+        priority=5,
+    )
+    extensions = ExtensionManager(root)
+    source = conventional_source(tmp_path, "secondary", f"commands/{COMMAND}.md", "PROVIDER BODY")
+    extensions.install_from_directory(source, "0.1.5", priority=10)
+    target = output_path(root, skills)
+    first = target.read_text()
+    before_files = {p.relative_to(root) for p in root.rglob("*") if p.is_file()}
+    def ownership(meta):
+        return (
+            meta.get("enabled"),
+            meta.get("priority"),
+            meta.get("registered_commands"),
+            meta.get("registered_skills"),
+        )
+
+    before_ownership = ownership(ExtensionManager(root).registry.get("secondary"))
+
+    extensions.install_from_directory(source, "0.1.5", priority=10, force=True)
+
+    assert target.read_text() == first
+    assert "PROVIDER BODY" in target.read_text()
+    # A reinstall rewrites the same destination: no file appears or disappears...
+    assert {p.relative_to(root) for p in root.rglob("*") if p.is_file()} == before_files
+    # ...and the recorded ownership is unchanged (no duplicate registration).
+    assert ownership(ExtensionManager(root).registry.get("secondary")) == before_ownership
+
+
+@pytest.mark.parametrize("skills", [False, True])
+def test_conventional_candidate_follows_the_new_winner(tmp_path, monkeypatch, skills):
+    """Adding a higher-precedence provider republishes the winner's content once."""
+    root = project(tmp_path, monkeypatch, "copilot" if skills else "gemini", skills)
+    PresetManager(root).install_from_directory(
+        preset(tmp_path, "selector", r"regex:speckit\.provider\..*", "SELECTOR BODY", strategy="append"),
+        "0.1.5",
+        priority=5,
+    )
+    extensions = ExtensionManager(root)
+    extensions.install_from_directory(
+        conventional_source(tmp_path, "first", f"commands/{COMMAND}.md", "FIRST BODY"),
+        "0.1.5",
+        priority=20,
+    )
+    target = output_path(root, skills)
+    assert "FIRST BODY" in target.read_text()
+
+    extensions.install_from_directory(
+        conventional_source(tmp_path, "second", f"commands/{COMMAND}.md", "SECOND BODY"),
+        "0.1.5",
+        priority=10,
+    )
+
+    content = target.read_text()
+    assert "SECOND BODY" in content
+    assert "FIRST BODY" not in content
+    assert len(list(target.parents[1].rglob("SKILL.md" if skills else "*.toml"))) == 1
+    layers = PresetResolver(root).collect_all_layers(COMMAND, "command")
+    assert layers[1]["source"].startswith("extension:second ")
+
+
+@pytest.mark.parametrize("skills", [False, True])
+def test_conventional_install_materializes_project_override(tmp_path, monkeypatch, skills):
+    """A project override wins resolution and must reach the agent during install.
+
+    A convention-only candidate carries no staged payload of its own, so the
+    winning override has to be published by the install transaction itself:
+    nothing may depend on a later lifecycle refresh to make the install correct.
+    """
+    root = project(tmp_path, monkeypatch, "copilot" if skills else "gemini", skills)
+    overrides = root / ".specify/templates/overrides"
+    overrides.mkdir(parents=True, exist_ok=True)
+    (overrides / f"{COMMAND}.md").write_text(
+        "PROJECT OVERRIDE BODY\n", encoding="utf-8"
+    )
+    manager = ExtensionManager(root)
+    source = conventional_source(
+        tmp_path, "provider", f"commands/{COMMAND}.md", "CONVENTIONAL BODY"
+    )
+    target = output_path(root, skills)
+    assert not target.exists()
+
+    manager.install_from_directory(source, "1.0.0", force=True, register_commands=True)
+
+    assert target.exists()
+    body = target.read_text(encoding="utf-8")
+    assert "PROJECT OVERRIDE BODY" in body
+    assert "CONVENTIONAL BODY" not in body

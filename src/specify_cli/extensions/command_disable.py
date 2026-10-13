@@ -108,6 +108,7 @@ def extension_disable(
 
     agent = load_init_options(project_root).get("ai")
     refresh_presets_after_commit = False
+    preserved_paths: list = []
     if agent == "generic":
         from . import ExtensionError
 
@@ -139,6 +140,14 @@ def extension_disable(
         if agent:
             historical_agents.add(agent)
         preset_manager = PresetManager(project_root)
+        # A skills-only integration records its skills in the agent-agnostic flat
+        # ``registered_skills`` list and never appears in ``registered_commands``,
+        # so switching agents before disabling would leave its global skills root
+        # out of the cleanup targets. Recover those owners from the recorded skills
+        # themselves before anything is captured or removed.
+        historical_agents |= _commands._extension_skill_owner_agents(
+            manager, preset_manager, extension_id, metadata
+        )
         registry_before = copy.deepcopy(manager.registry.data)
         snapshot = _ArtifactSnapshot()
         captured = False
@@ -157,8 +166,10 @@ def extension_disable(
             # Remove each agent's tracked artifacts before flipping enabled so a
             # rollback restores the exact prior ownership state.
             for historical_agent in sorted(historical_agents):
-                manager.unregister_agent_artifacts(
-                    historical_agent, extension_ids={extension_id}
+                preserved_paths.extend(
+                    manager.unregister_agent_artifacts(
+                        historical_agent, extension_ids={extension_id}
+                    )
                 )
             manager.registry.update(extension_id, {"enabled": False})
             _disable_hooks(hook_executor, extension_id)
@@ -195,6 +206,13 @@ def extension_disable(
                     )
                 else:
                     raise
+
+    if preserved_paths:
+        console.print(
+            f"[yellow]⚠[/yellow]  Kept {len(preserved_paths)} file(s) that no longer "
+            "carry this extension's source marker: "
+            + ", ".join(_escape_markup(str(path)) for path in preserved_paths)
+        )
 
     console.print(
         f"[green]✓[/green] Extension '{_escape_markup(str(display_name))}' disabled"

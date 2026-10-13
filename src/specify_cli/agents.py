@@ -12,7 +12,7 @@ import re
 from collections.abc import Callable
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 import yaml
 
@@ -22,6 +22,12 @@ from ._toml_string import escape_toml_basic as _escape_toml_basic
 from ._toml_string import has_illegal_toml_control as _has_illegal_toml_control
 from ._utils import relative_extension_path_violation
 from .integrations._registration import project_registration
+from .ownership import (
+    artifact_file_belongs_to,
+    generated_this_operation,
+    is_managed_output,
+    transactional_writes_active,
+)
 
 
 def _build_agent_configs() -> dict[str, Any]:
@@ -36,6 +42,37 @@ def _build_agent_configs() -> dict[str, Any]:
         if integration.registrar_config:
             configs[key] = resolve_registrar_config(integration)
     return configs
+
+
+def _render_prompt_file(cmd_name: str) -> str:
+    """The exact companion prompt the registrar writes for ``cmd_name``."""
+    return f"---\nagent: {cmd_name}\n---\n"
+
+
+def _prompt_belongs_to(
+    prompt_file: Path,
+    cmd_name: str,
+    source_id: str,
+    owner_kind: str,
+    own_directories: Sequence[Path],
+) -> bool:
+    """True when a Copilot companion prompt is still ours.
+
+    Prompts carry no ownership marker of their own, so a prompt is ours only while it
+    is byte-for-byte what we render; anything the user rewrote (or a link we do not
+    own) is preserved and reported rather than deleted.
+    """
+    if prompt_file.is_symlink():
+        return artifact_file_belongs_to(
+            prompt_file, kind=owner_kind, owner_id=source_id, own_directories=own_directories
+        )
+    try:
+        text = prompt_file.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    # Byte-for-byte, not "looks like": a prompt the user edited -- even one that still
+    # carries a marker -- is theirs.
+    return text == _render_prompt_file(cmd_name)
 
 
 class CommandRegistrar:
@@ -717,6 +754,9 @@ class CommandRegistrar:
         commands_dir.mkdir(parents=True, exist_ok=True)
 
         registered = []
+        # Destinations left untouched because they are not managed output; the caller
+        # reports them instead of letting registration silently clobber user content.
+        self.preserved_paths: List[Path] = []
         is_cline_ext = agent_name == "cline" and source_id != "core"
         source_root = source_dir.resolve()
 
@@ -916,6 +956,23 @@ class CommandRegistrar:
             if agent_name == "generic" and (dest_file.exists() or dest_file.is_symlink()):
                 if not self._generic_owned_output(dest_file, source_id, project_root):
                     continue
+            if (
+                dest_file.exists() or dest_file.is_symlink()
+            ) and not transactional_writes_active():
+                # Registration may refresh its own output (or another owner's), never
+                # overwrite a file no owner claims: a user's replacement is theirs.
+                # Inside an install/rollback transaction the write is expected and the
+                # transaction restores the previous bytes if it fails.
+                if not self._destination_is_managed_output(
+                    dest_file, output, agent_config, source_dir
+                ):
+                    self.preserved_paths.append(dest_file)
+                    if agent_name == "copilot":
+                        # The companion prompt travels with its command: report it too.
+                        self.preserved_paths.append(
+                            project_root / ".github" / "prompts" / f"{cmd_name}.prompt.md"
+                        )
+                    continue
             dest_file.parent.mkdir(parents=True, exist_ok=True)
             self._write_registered_output(
                 dest_file,
@@ -932,7 +989,10 @@ class CommandRegistrar:
                 on_output(cmd_name)
 
             if agent_name == "copilot":
-                self.write_copilot_prompt(project_root, cmd_name)
+                if not self.write_copilot_prompt(project_root, cmd_name):
+                    self.preserved_paths.append(
+                        project_root / ".github" / "prompts" / f"{cmd_name}.prompt.md"
+                    )
 
             for alias in aliases:
                 alias_output_name = self._compute_output_name(
@@ -1002,6 +1062,20 @@ class CommandRegistrar:
                 if agent_name == "generic" and (alias_file.exists() or alias_file.is_symlink()):
                     if not self._generic_owned_output(alias_file, source_id, project_root):
                         continue
+                if (
+                    alias_file.exists() or alias_file.is_symlink()
+                ) and not transactional_writes_active():
+                    # Aliases get the same protection as the primary output: content
+                    # no owner claims is the user's, not ours to overwrite.
+                    if not self._destination_is_managed_output(
+                        alias_file, alias_output, agent_config, source_dir
+                    ):
+                        self.preserved_paths.append(alias_file)
+                        if agent_name == "copilot":
+                            self.preserved_paths.append(
+                                project_root / ".github" / "prompts" / f"{alias}.prompt.md"
+                            )
+                        continue
                 alias_file.parent.mkdir(parents=True, exist_ok=True)
                 self._write_registered_output(
                     alias_file,
@@ -1016,8 +1090,12 @@ class CommandRegistrar:
                 registered.append(alias)
                 if on_output is not None:
                     on_output(alias)
-                if agent_name == "copilot":
-                    self.write_copilot_prompt(project_root, alias)
+                if agent_name == "copilot" and not self.write_copilot_prompt(
+                    project_root, alias
+                ):
+                    self.preserved_paths.append(
+                        project_root / ".github" / "prompts" / f"{alias}.prompt.md"
+                    )
 
         return registered
 
@@ -1070,13 +1148,87 @@ class CommandRegistrar:
             dest_file.write_text(content, encoding="utf-8")
         after_file_change(dest_file)
 
+    def _destination_is_managed_output(
+        self,
+        dest_file: Path,
+        rendered: str,
+        agent_config: dict[str, Any],
+        source_dir: Path,
+    ) -> bool:
+        """True when an existing destination may be overwritten by registration.
+
+        Our own output, another owner's marked output, the identical bytes, or a
+        dev-mode link into this source's own cache are all refreshable; anything else
+        is content registration does not own, so it is preserved and reported.
+        """
+        if dest_file.is_symlink():
+            try:
+                resolved = dest_file.resolve()
+            except OSError:
+                return False
+            # Any dev-cache link is refreshable: a re-install replaces the previous
+            # dev symlink even when it was created from a different staging directory.
+            if ".specify-dev" in resolved.parts:
+                return True
+            cache_root = source_dir / ".specify-dev"
+            try:
+                resolved.relative_to(cache_root.resolve())
+            except (OSError, ValueError):
+                return False
+            return True
+        try:
+            current = dest_file.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return False
+        if current == rendered:
+            return True
+        if generated_this_operation(dest_file):
+            # Our own machinery generated this layer file during this process, so
+            # registration may take it over even though it carries no marker.
+            return True
+        if self._is_project_core_render(dest_file, current):
+            # The integration scaffold copies the project's own core command in
+            # verbatim, with no marker; it is still ours to take over.
+            return True
+        return is_managed_output(current, agent_config.get("format", "markdown"))
+
+    def _is_project_core_render(self, dest_file: Path, current: str) -> bool:
+        """True when *dest_file* is a copy of the project's core command template.
+
+        Scaffolded layer files carry no ownership marker because their writer is the
+        integration, not the registrar; comparing the bytes against the project's own
+        ``.specify/templates/commands/<short>.md`` proves the file is generated output
+        rather than something the user authored.
+        """
+        short = dest_file.stem.rsplit(".", 1)[-1]
+        if not short:
+            return False
+        for parent in dest_file.parents:
+            templates = parent / ".specify" / "templates" / "commands"
+            if templates.is_dir():
+                try:
+                    template = (templates / f"{short}.md").read_text(
+                        encoding="utf-8", errors="replace"
+                    )
+                except OSError:
+                    return False
+                return current.strip() == template.strip()
+        return False
+
     @staticmethod
-    def write_copilot_prompt(project_root: Path, cmd_name: str) -> None:
+    def write_copilot_prompt(project_root: Path, cmd_name: str) -> bool:
         """Generate a companion .prompt.md file for a Copilot agent command.
+
+        A prompt that is not already ours (byte-for-byte the canonical render) is
+        left in place: registration may refresh its own output, never the user's.
+        Skipped prompts are recorded by the caller for reporting.
 
         Args:
             project_root: Path to project root
             cmd_name: Command name (e.g. 'speckit.my-ext.example')
+
+        Returns:
+            True when the prompt is ours (written or already current).
         """
         name_reason = relative_extension_path_violation(cmd_name)
         if name_reason:
@@ -1090,9 +1242,17 @@ class CommandRegistrar:
         prompt_file.parent.mkdir(parents=True, exist_ok=True)
         from .integrations._file_changes import after_file_change, before_file_change
 
+        if not transactional_writes_active() and prompt_file.exists():
+            try:
+                current = prompt_file.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                return False
+            if current != _render_prompt_file(cmd_name):
+                return False
         before_file_change(prompt_file)
-        prompt_file.write_text(f"---\nagent: {cmd_name}\n---\n", encoding="utf-8")
+        prompt_file.write_text(_render_prompt_file(cmd_name), encoding="utf-8")
         after_file_change(prompt_file)
+        return True
 
     @staticmethod
     def _resolve_agent_dir(
@@ -1381,8 +1541,14 @@ class CommandRegistrar:
         return results
 
     def unregister_commands(
-        self, registered_commands: Dict[str, List[str]], project_root: Path
-    ) -> None:
+        self,
+        registered_commands: Dict[str, List[str]],
+        project_root: Path,
+        *,
+        source_id: str | None = None,
+        owner_kind: str = "extension",
+        own_directories: Sequence[Path] = (),
+    ) -> List[Path]:
         """Remove previously registered command files from agent directories.
 
         When a ``legacy_dir`` is configured, files are removed from
@@ -1390,11 +1556,28 @@ class CommandRegistrar:
         commands left behind after an ``integration upgrade`` are
         cleaned up as well.
 
+        When ``source_id`` is given, a candidate is removed only while the file is
+        still *verifiably* that owner's: the marker must sit where the renderer puts
+        it, name exactly this id, and a symlink must resolve inside the owner's own
+        directories. Anything else -- user content, another owner's file -- is left
+        in place and returned so the caller can report it instead of silently
+        deleting work it does not own.  ``source_id=None`` keeps the transactional
+        behaviour (a rollback removes exactly what the transaction wrote).
+
         Args:
             registered_commands: Dict mapping agent names to command name lists
             project_root: Path to project root
+            source_id: Owner that must still be verifiable for removal
+            owner_kind: ``"extension"`` or ``"preset"``; the two are never
+                interchangeable, so a preset cannot claim an extension's artifact
+            own_directories: The owner's own staging directories; only symlinks
+                resolving inside them count as owned
+
+        Returns:
+            Paths preserved because they are no longer verifiably ``source_id``'s.
         """
         self._ensure_configs()
+        preserved: List[Path] = []
         for agent_name, cmd_names in registered_commands.items():
             if agent_name not in self.AGENT_CONFIGS:
                 continue
@@ -1417,6 +1600,9 @@ class CommandRegistrar:
                 output_name = self._compute_output_name(
                     agent_name, cmd_name, agent_config
                 )
+                # Set when the canonical output for this command was preserved because
+                # it belongs to someone else; the companion prompt is then theirs too.
+                command_file_preserved = False
 
                 names_to_clean = [output_name]
                 if output_name != cmd_name and self._is_safe_command_name(cmd_name):
@@ -1432,6 +1618,17 @@ class CommandRegistrar:
                         except ValueError:
                             continue
                         if cmd_file.exists() or cmd_file.is_symlink():
+                            if source_id is not None and not artifact_file_belongs_to(
+                                cmd_file,
+                                kind=owner_kind,
+                                owner_id=source_id,
+                                own_directories=own_directories,
+                                style=agent_config.get("format", "markdown"),
+                            ):
+                                # No longer verifiably this owner's file: keep the
+                                # user's (or the other owner's) content and report it.
+                                preserved.append(cmd_file)
+                                continue
                             from .integrations._file_changes import after_file_change, before_file_change
 
                             before_file_change(cmd_file, removal=True)
@@ -1452,12 +1649,30 @@ class CommandRegistrar:
                     prompt_file = (
                         project_root / ".github" / "prompts" / f"{cmd_name}.prompt.md"
                     )
-                    if prompt_file.exists():
+                    if prompt_file.exists() or prompt_file.is_symlink():
+                        if command_file_preserved:
+                            # The command file is another owner's now, so the prompt
+                            # that accompanies it is not ours to remove either.
+                            preserved.append(prompt_file)
+                            continue
+                        if source_id is not None and not _prompt_belongs_to(
+                            prompt_file,
+                            cmd_name,
+                            source_id,
+                            owner_kind,
+                            own_directories,
+                        ):
+                            # A prompt the user rewrote, or another owner's, is not
+                            # ours to delete.
+                            preserved.append(prompt_file)
+                            continue
                         from .integrations._file_changes import after_file_change, before_file_change
 
                         before_file_change(prompt_file, removal=True)
                         prompt_file.unlink()
                         after_file_change(prompt_file)
+
+        return preserved
 
 
 # Populate AGENT_CONFIGS after class definition.

@@ -122,7 +122,7 @@ def test_legacy_refresh_preserves_failure_contract(
         assert calls[0][1]["strict"] is True
     else:
         _refresh_presets_and_warn(root, {COMMAND})
-        assert "legacy registration failed" in capsys.readouterr().out
+        assert "legacy registration failed" in " ".join(capsys.readouterr().out.split())
         assert all("strict" not in kwargs for _, kwargs in calls)
     assert calls
     assert {agent for agent, _ in calls} <= {"gemini", "copilot"}
@@ -158,7 +158,7 @@ def test_legacy_discovery_preserves_failure_contract(
             _refresh_presets_and_warn(root, strict=True)
     else:
         _refresh_presets_and_warn(root)
-        assert "legacy discovery failed" in capsys.readouterr().out
+        assert "legacy discovery failed" in " ".join(capsys.readouterr().out.split())
 
 
 @pytest.mark.parametrize("mutation", ["disable", "remove", "set-priority"])

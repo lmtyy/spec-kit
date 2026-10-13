@@ -650,11 +650,15 @@ class IntegrationBase(ABC):
         """
         normalized = content.replace("\r\n", "\n")
         from ._file_changes import after_file_change, before_file_change
+        from ..ownership import note_generated_write
 
         before_file_change(dest)
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(normalized.encode("utf-8"))
         after_file_change(dest)
+        # Generated layer output: registration may take this file over even though.
+        # it carries no ownership marker of its own.
+        note_generated_write(dest)
         rel = dest.resolve().relative_to(project_root.resolve())
         manifest.record_existing(rel)
         return dest
