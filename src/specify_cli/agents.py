@@ -75,6 +75,7 @@ def _prompt_belongs_to(
     return text == _render_prompt_file(cmd_name)
 
 
+
 class CommandRegistrar:
     """Handles registration of commands with AI agents.
 
@@ -1166,10 +1167,16 @@ class CommandRegistrar:
                 resolved = dest_file.resolve()
             except OSError:
                 return False
-            # Any dev-cache link is refreshable: a re-install replaces the previous
-            # dev symlink even when it was created from a different staging directory.
+            # A re-install replaces the previous dev symlink even when that link was
+            # created from a different staging directory -- but only a cache inside this
+            # project is ours to replace.  A link into someone else's checkout is not.
             if ".specify-dev" in resolved.parts:
-                return True
+                # A re-install replaces the previous dev symlink even when that link was
+                # created from a different staging directory, so the target is not tied to
+                # `source_dir` and cannot be attributed to an owner by path.  Only the link
+                # at this managed destination is replaced; the linked target itself is
+                # never written or removed.
+                return resolved.is_file()
             cache_root = source_dir / ".specify-dev"
             try:
                 resolved.relative_to(cache_root.resolve())
@@ -1627,7 +1634,10 @@ class CommandRegistrar:
                             ):
                                 # No longer verifiably this owner's file: keep the
                                 # user's (or the other owner's) content and report it.
+                                # The companion prompt belongs to the same artifact, so
+                                # it must be kept with it (see the prompt branch below).
                                 preserved.append(cmd_file)
+                                command_file_preserved = True
                                 continue
                             from .integrations._file_changes import after_file_change, before_file_change
 

@@ -731,8 +731,13 @@ def test_preset_cleanup_preserves_user_content_and_owner_separation(tmp_path, mo
         owner_kind="preset",
         own_directories=(manager.presets_dir / "provider",),
     )
-    assert preserved == [owned]
+    # The companion prompt belongs to the same command: keeping the command keeps it,
+    # and it is reported alongside so the caller can see both were left alone.
+    prompt = root / ".github" / "prompts" / f"{COMMAND}.prompt.md"
+    assert prompt.is_file()
+    assert set(preserved) == {owned, prompt}
     assert owned.read_text(encoding="utf-8") == "my own command\n"
+    assert not prompt.is_symlink()
 
     # (2) registration must not overwrite the user's file either
     manager.register_enabled_presets_for_agent("copilot")
@@ -750,7 +755,7 @@ def test_preset_cleanup_preserves_user_content_and_owner_separation(tmp_path, mo
         owner_kind="preset",
         own_directories=(manager.presets_dir / "provider",),
     )
-    assert preserved == [owned]
+    assert set(preserved) == {owned, prompt}
     assert "other-preset" in owned.read_text(encoding="utf-8")
 
     manager.register_enabled_presets_for_agent("copilot")

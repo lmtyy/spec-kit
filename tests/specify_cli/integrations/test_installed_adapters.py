@@ -3009,19 +3009,21 @@ def test_round3_managers_snapshot_the_requested_project_atomically(tmp_path, ser
         })
         first_leaf = first / ".sample-first/skills/speckit-sample/SKILL.md"
         other_leaf = first / ".sample-second/skills/speckit-sample/SKILL.md"
+        owned_output = (
+            "---\nname: speckit-sample\n"
+            "metadata:\n  source: sample-extension:commands/sample.md\n---\n"
+            "preserve the correct project scope\n"
+        )
         for leaf in (first_leaf, other_leaf):
             leaf.parent.mkdir(parents=True, exist_ok=True)
             # Real extension output carries its owner's marker; only marker-verified
             # files are the extension's to remove.
-            leaf.write_text(
-                "---\nname: speckit-sample\n"
-                "metadata:\n  source: sample-extension:commands/sample.md\n---\n"
-                "preserve the correct project scope\n",
-                encoding="utf-8",
-            )
+            leaf.write_text(owned_output, encoding="utf-8")
         assert manager.remove("sample-extension")
         assert not first_leaf.exists()
-        assert "preserve the correct project scope" in other_leaf.read_text()
+        # The other project's file must be untouched byte for byte, not merely still
+        # containing its body: a rewritten header or appended text is corruption too.
+        assert other_leaf.read_text(encoding="utf-8") == owned_output
 
 
 @pytest.mark.parametrize("operation", ["add", "remove", "enable", "disable"])
