@@ -3019,11 +3019,12 @@ def test_round3_managers_snapshot_the_requested_project_atomically(tmp_path, ser
             # Real extension output carries its owner's marker; only marker-verified
             # files are the extension's to remove.
             leaf.write_text(owned_output, encoding="utf-8")
+        # The other project's file must be untouched byte for byte: capture the bytes
+        # the fixture wrote, so the comparison does not assume a newline convention.
+        untouched = other_leaf.read_bytes()
         assert manager.remove("sample-extension")
         assert not first_leaf.exists()
-        # The other project's file must be untouched byte for byte, not merely still
-        # containing its body: a rewritten header or appended text is corruption too.
-        assert other_leaf.read_bytes() == owned_output.encode("utf-8")
+        assert other_leaf.read_bytes() == untouched
 
 
 @pytest.mark.parametrize("operation", ["add", "remove", "enable", "disable"])

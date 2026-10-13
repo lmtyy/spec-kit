@@ -93,9 +93,12 @@ def note_generated_write(path, content: str | None = None) -> None:
     key = str(Path(path))
     if content is None:
         try:
-            content = Path(path).read_text(encoding="utf-8", errors="replace")
+            # Hash the bytes on disk: verification reads bytes, and a text read would
+            # translate newlines differently on Windows (``\r\n`` vs ``\n``).
+            current[key] = hashlib.sha256(Path(path).read_bytes()).hexdigest()
         except (OSError, TypeError, ValueError):
             return
+        return
     try:
         current[key] = hashlib.sha256(content.encode("utf-8")).hexdigest()
     except (TypeError, ValueError):
