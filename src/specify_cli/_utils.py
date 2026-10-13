@@ -398,3 +398,25 @@ def is_link_like(path) -> bool:
     except (OSError, AttributeError):
         return False
     return bool(attributes & _stat.FILE_ATTRIBUTE_REPARSE_POINT)
+
+def link_targets_directory(path) -> bool:
+    """True when a link was created as a *directory* link.
+
+    ``Path.is_dir()`` follows the target, so a directory symlink whose target is missing
+    looks like a file link.  That matters on Windows, where a link's type is permanent:
+    a snapshot would restore a directory link as a file link.  The link's own attributes
+    are authoritative where the platform records them; elsewhere the target decides, as
+    before.
+    """
+    from pathlib import Path
+    import os
+    import stat as _stat
+
+    candidate = Path(path)
+    if os.name == "nt":
+        try:
+            attributes = candidate.lstat().st_file_attributes
+            return bool(attributes & _stat.FILE_ATTRIBUTE_DIRECTORY)
+        except (OSError, AttributeError):
+            pass
+    return candidate.is_dir()

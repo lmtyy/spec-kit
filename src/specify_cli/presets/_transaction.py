@@ -78,7 +78,12 @@ class _ArtifactSnapshot:
             return
         backup = Path(self._temp.name) / str(len(self._paths))
         if path.is_symlink():
-            is_dir = path.is_dir()
+            # The link's own type, not the target's: a directory link whose target is
+            # missing would otherwise be recorded (and later recreated) as a file link,
+            # and Windows cannot change a link's type after creation.
+            from .._utils import link_targets_directory
+
+            is_dir = link_targets_directory(path)
             self._symlink_is_dir[path] = is_dir
             backup.symlink_to(path.readlink(), target_is_directory=is_dir)
         elif path.is_dir():

@@ -110,3 +110,33 @@ def test_directory_symlink_survives_a_snapshot_round_trip(tmp_path):
     assert link.is_dir(), "restored directory link does not resolve to a directory"
     assert link.samefile(real_dir)
     snapshot.close()
+
+
+def test_directory_link_type_survives_a_dangling_target(tmp_path, monkeypatch):
+    """A directory link must be recorded as one even when its target is gone.
+
+    ``Path.is_dir()`` follows the target, so a dangling directory symlink looks like a
+    file link; on Windows the type is permanent and the snapshot would restore the wrong
+    one.  The capture must consult the link's own type.
+    """
+    import specify_cli._utils as _u
+
+    target = tmp_path / "missing-target"
+    link = tmp_path / "dangling-dir-link"
+    link.symlink_to(target, target_is_directory=True)
+
+    seen: list[bool] = []
+    real_symlink_to = type(link).symlink_to
+
+    def spy(self, *args, **kwargs):
+        seen.append(bool(kwargs.get("target_is_directory")))
+        return real_symlink_to(self, *args, **kwargs)
+
+    monkeypatch.setattr(_u, "link_targets_directory", lambda p: True, raising=True)
+    monkeypatch.setattr(type(link), "symlink_to", spy, raising=True)
+    snapshot = _transaction._ArtifactSnapshot()
+    try:
+        snapshot.capture(link)
+    finally:
+        getattr(snapshot, "close", lambda: None)()
+    assert seen == [True], "the directory link type must be preserved in the snapshot"
